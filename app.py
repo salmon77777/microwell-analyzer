@@ -1,98 +1,92 @@
 import streamlit as st
-import cv2
 import numpy as np
+import cv2
 from PIL import Image
+from streamlit_canvas import st_canvas
 
-# 1. 페이지 기본 설정
-st.set_page_config(page_title="Microwell Analyzer", layout="wide")
+st.set_page_config(page_title="Custom Microwell Analyzer", layout="wide")
+st.title("🔬 사용자 지정 Microwell 분석기")
+st.write("이미지 위에 원을 드래그하여 그려주세요. 각 원 내부의 형광을 분석합니다.")
 
-# 점선 원 그리기 함수 (파란색, 얇게 수정됨)
-def draw_dotted_circle(img, center, radius, color, thickness=1, gap=8):
-    circumference = 2 * np.pi * radius
-    num_dots = int(circumference / gap)
-    for i in range(num_dots):
-        start_angle = (360 / num_dots) * i
-        end_angle = start_angle + (180 / num_dots)
-        # OpenCV는 BGR 색상 체계를 사용합니다. 파란색은 (255, 0, 0)입니다.
-        cv2.ellipse(img, center, (radius, radius), 0, start_angle, end_angle, color, thickness)
+# 1. 설정 사이드바
+st.sidebar.header("⚙️ 분석 설정")
+threshold = st.sidebar.slider("형광 판정 임계값 (G값)", 0, 255, 120)
+stroke_width = st.sidebar.slider("그리기 선 두께", 1, 5, 1)
+realtime_update = st.sidebar.checkbox("실시간 업데이트", True)
 
-st.title("🔬 정밀 Microwell 분석기")
-st.markdown("---")
+# 2. 파일 업로드
+uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=["png", "jpg", "jpeg"])
 
-# 2. 업로드 버튼
-uploaded_file = st.file_uploader("1. 분석할 Microwell 사진을 선택하세요", type=['jpg', 'png', 'jpeg'])
-
-# 3. 사이드바 설정
-st.sidebar.header("⚙️ 분석 세부 설정")
-st.sidebar.write("파란색 점선이 우물 테두리에 맞게 조절하세요.")
-
-# 파라미터들
-min_rad = st.sidebar.number_input("우물 최소 반지름 (픽셀)", 1, 50, 5)
-max_rad = st.sidebar.number_input("우물 최대 반지름 (픽셀)", 1, 100, 15)
-param2_val = st.sidebar.slider("원 인식 감도 (낮을수록 많이 찾음)", 5, 50, 20)
-min_dist = st.sidebar.slider("우물 간 최소 거리", 5, 100, 15)
-threshold = st.sidebar.slider("형광 판정 임계값 (G값)", 0, 255, 130)
-
-if uploaded_file is not None:
-    # 이미지 처리 시작
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, 1)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    display_img = img_rgb.copy()
+if uploaded_file:
+    bg_image = Image.open(uploaded_file)
+    w, h = bg_image.size
+    # 화면에 맞게 이미지 크기 조정 (표시용)
+    display_width = 800
+    display_height = int(h * (display_width / w))
     
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 5)
+    st.subheader("🖍️ 마우스로 우물 위에 원을 그리세요")
+    st.caption("왼쪽 도구 모음에서 'Circle' 아이콘(○)을 선택하고 드래그하세요.")
 
-    # 원형 감지
-    circles = cv2.HoughCircles(
-        gray, cv2.HOUGH_GRADIENT, dp=1, 
-        minDist=min_dist, 
-        param1=50, param2=param2_val, 
-        minRadius=min_rad, maxRadius=max_rad
+    # 3. 캔버스 도구 (사용자가 드래그해서 원을 그림)
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 165, 0, 0.2)",  # 원 내부 투명한 오렌지색
+        stroke_width=stroke_width,
+        stroke_color="blue", # 요청하신 파란색 선
+        background_image=bg_image,
+        update_streamlit=realtime_update,
+        height=display_height,
+        width=display_width,
+        drawing_mode="circle",
+        key="canvas",
     )
 
-    if circles is not None:
-        circles = np.uint16(np.around(circles))
-        pos_count = 0
-        total_count = len(circles[0])
-
-        for i in circles[0, :]:
-            center = (i[0], i[1])
-            radius = i[2]
+    # 4. 분석 로직
+    if canvas_result.json_data is not None:
+        objects = canvas_result.json_data["objects"]
+        if len(objects) > 0:
+            st.subheader(f"📊 분석 결과 (감지된 원: {len(objects)}개)")
             
-            # 1. 모든 인식된 원을 [얇은 파란색 점선]으로 표시
-            # 색상: (255, 0, 0) - BGR 기준 순수 파란색
-            # 두께: 1 (최소 두께)
-            # 간격: 8 (점선 간격을 넓혀 더 얇아 보이게 함)
-            draw_dotted_circle(display_img, center, radius, (255, 0, 0), thickness=1, gap=8)
+            img_array = np.array(bg_image.convert("RGB"))
+            pos_count = 0
+            
+            # 캔버스 좌표를 원본 이미지 좌표로 변환하기 위한 비율
+            scale_x = w / display_width
+            scale_y = h / display_height
 
-            # 2. 녹색(Green) 채널 분석
-            mask = np.zeros(gray.shape, dtype=np.uint8)
-            cv2.circle(mask, center, radius, 255, -1)
-            mean_val = cv2.mean(img_rgb, mask=mask)
-            green_val = mean_val[1]
+            results_data = []
 
-            # 3. 임계값 이상이면 내부에 작은 초록 점 표시
-            if green_val > threshold:
-                pos_count += 1
-                cv2.circle(display_img, center, 2, (0, 255, 0), -1)
+            for obj in objects:
+                if obj["type"] == "circle":
+                    # 원의 좌표 및 반지름 계산
+                    left = obj["left"] * scale_x
+                    top = obj["top"] * scale_y
+                    radius = obj["radius"] * scale_x
+                    
+                    center_x = int(left + radius)
+                    center_y = int(top + radius)
+                    r = int(radius)
 
-        # 결과 이미지 출력
-        st.image(display_img, caption='파란 점선: 인식된 구역 / 중앙 초록점: Positive 판정', use_container_width=True)
-        
-        # 리포트 출력
-        percent = (pos_count / total_count) * 100 if total_count > 0 else 0
-        
-        st.subheader("📊 분석 결과 요약")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("인식된 우물 수", f"{total_count}개")
-        c2.metric("Positive (형광)", f"{pos_count}개")
-        c3.metric("형광 발현 비율", f"{percent:.1f}%")
+                    # 마스크 생성 및 평균값 추출
+                    mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.circle(mask, (center_x, center_y), r, 255, -1)
+                    mean_val = cv2.mean(img_array, mask=mask)
+                    green_avg = mean_val[1] # Green 채널
 
-        # 결과 저장
-        res_bytes = cv2.imencode(".png", cv2.cvtColor(display_img, cv2.COLOR_RGB2BGR))[1].tobytes()
-        st.download_button("📸 분석 결과 이미지 저장", data=res_bytes, file_name="analysis.png", mime="image/png")
-    else:
-        st.error("우물을 감지하지 못했습니다. 왼쪽 '감도'를 낮추거나 '반지름'을 조절하세요.")
-else:
-    st.info("위의 버튼을 눌러 분석할 사진을 올려주세요.")
+                    is_positive = green_avg > threshold
+                    if is_positive:
+                        pos_count += 1
+                    
+                    results_data.append(is_positive)
+
+            # 통계 표시
+            total = len(objects)
+            percent = (pos_count / total) * 100 if total > 0 else 0
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("총 그린 우물", f"{total}개")
+            col2.metric("Positive (형광)", f"{pos_count}개")
+            col3.metric("형광 발현 비율", f"{percent:.1f}%")
+            
+            st.info("💡 팁: 원을 잘못 그렸다면 왼쪽 도구함의 쓰레기통 아이콘을 누르거나, 선택 모드(화살표)로 클릭 후 'Delete' 키를 누르세요.")
+        else:
+            st.warning("분석할 원을 하나 이상 그려주세요.")
