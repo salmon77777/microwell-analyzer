@@ -78,4 +78,21 @@ if uploaded_file is not None:
                 cv2.circle(display_img, center, 2, (0, 255, 0), -1)
 
         # 결과 이미지 출력
-        st.image(display_img, caption='파란 점선: 인식된 구역 / 중앙 초록점: Positive 판정', use_container
+        st.image(display_img, caption='파란 점선: 인식된 구역 / 중앙 초록점: Positive 판정', use_container_width=True)
+        
+        # 리포트 출력
+        percent = (pos_count / total_count) * 100 if total_count > 0 else 0
+        
+        st.subheader("📊 분석 결과 요약")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("인식된 우물 수", f"{total_count}개")
+        c2.metric("Positive (형광)", f"{pos_count}개")
+        c3.metric("형광 발현 비율", f"{percent:.1f}%")
+
+        # 결과 저장
+        res_bytes = cv2.imencode(".png", cv2.cvtColor(display_img, cv2.COLOR_RGB2BGR))[1].tobytes()
+        st.download_button("📸 분석 결과 이미지 저장", data=res_bytes, file_name="analysis.png", mime="image/png")
+    else:
+        st.error("우물을 감지하지 못했습니다. 왼쪽 '감도'를 낮추거나 '반지름'을 조절하세요.")
+else:
+    st.info("위의 버튼을 눌러 분석할 사진을 올려주세요.")
