@@ -1,92 +1,75 @@
 import streamlit as st
-import numpy as np
 import cv2
+import numpy as np
 from PIL import Image
-from streamlit_canvas import st_canvas
 
-st.set_page_config(page_title="Custom Microwell Analyzer", layout="wide")
-st.title("🔬 사용자 지정 Microwell 분석기")
-st.write("이미지 위에 원을 드래그하여 그려주세요. 각 원 내부의 형광을 분석합니다.")
+st.set_page_config(page_title="Microwell Grid Analyzer", layout="wide")
+st.title("🔬 격자 맞춤형 Microwell 분석기")
 
-# 1. 설정 사이드바
-st.sidebar.header("⚙️ 분석 설정")
+# 1. 사이드바: 격자 배치 설정
+st.sidebar.header("📏 격자 설정 (Grid Setup)")
+col_count = st.sidebar.number_input("가로 우물 개수", 1, 100, 20)
+row_count = st.sidebar.number_input("세로 우물 개수", 1, 100, 15)
+
+st.sidebar.markdown("---")
+st.sidebar.write("📍 위치 및 간격 조절")
+start_x = st.sidebar.slider("첫 번째 우물 X 좌표", 0, 1500, 100)
+start_y = st.sidebar.slider("첫 번째 우물 Y 좌표", 0, 1500, 100)
+gap_x = st.sidebar.slider("가로 간격 (Spacing X)", 1, 100, 25)
+gap_y = st.sidebar.slider("세로 간격 (Spacing Y)", 1, 100, 25)
+radius = st.sidebar.slider("우물 반지름", 1, 50, 8)
+
+st.sidebar.markdown("---")
 threshold = st.sidebar.slider("형광 판정 임계값 (G값)", 0, 255, 120)
-stroke_width = st.sidebar.slider("그리기 선 두께", 1, 5, 1)
-realtime_update = st.sidebar.checkbox("실시간 업데이트", True)
 
-# 2. 파일 업로드
-uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=["png", "jpg", "jpeg"])
+# 2. 사진 업로드
+uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    bg_image = Image.open(uploaded_file)
-    w, h = bg_image.size
-    # 화면에 맞게 이미지 크기 조정 (표시용)
-    display_width = 800
-    display_height = int(h * (display_width / w))
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w, _ = img.shape
+    display_img = img_rgb.copy()
     
-    st.subheader("🖍️ 마우스로 우물 위에 원을 그리세요")
-    st.caption("왼쪽 도구 모음에서 'Circle' 아이콘(○)을 선택하고 드래그하세요.")
-
-    # 3. 캔버스 도구 (사용자가 드래그해서 원을 그림)
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 165, 0, 0.2)",  # 원 내부 투명한 오렌지색
-        stroke_width=stroke_width,
-        stroke_color="blue", # 요청하신 파란색 선
-        background_image=bg_image,
-        update_streamlit=realtime_update,
-        height=display_height,
-        width=display_width,
-        drawing_mode="circle",
-        key="canvas",
-    )
-
-    # 4. 분석 로직
-    if canvas_result.json_data is not None:
-        objects = canvas_result.json_data["objects"]
-        if len(objects) > 0:
-            st.subheader(f"📊 분석 결과 (감지된 원: {len(objects)}개)")
+    pos_count = 0
+    total_wells = col_count * row_count
+    
+    # 격자 생성 및 분석
+    for r in range(row_count):
+        for c in range(col_count):
+            center_x = start_x + (c * gap_x)
+            center_y = start_y + (r * gap_y)
             
-            img_array = np.array(bg_image.convert("RGB"))
-            pos_count = 0
-            
-            # 캔버스 좌표를 원본 이미지 좌표로 변환하기 위한 비율
-            scale_x = w / display_width
-            scale_y = h / display_height
+            # 이미지 범위 내에 있는 경우만 분석
+            if center_x < w and center_y < h:
+                # 개별 우물 영역 분석
+                mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.circle(mask, (center_x, center_y), radius, 255, -1)
+                mean_val = cv2.mean(img_rgb, mask=mask)
+                green_val = mean_val[1] # Green 채널 평균값
+                
+                # 임계값 판정
+                if green_val > threshold:
+                    pos_count += 1
+                    cv2.circle(display_img, (center_x, center_y), 2, (0, 255, 0), -1) # 중앙 초록점
+                
+                # 파란색 얇은 테두리 표시
+                cv2.circle(display_img, (center_x, center_y), radius, (50, 150, 255), 1)
 
-            results_data = []
+    # 결과 화면 출력
+    st.image(display_img, caption="격자 분석 결과 (파란 원: 격자 구역 / 초록 점: Positive)", use_container_width=True)
+    
+    # 3. 리포트
+    percent = (pos_count / total_wells) * 100 if total_wells > 0 else 0
+    st.subheader("📊 분석 결과 요약")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("총 우물 수", f"{total_wells}개")
+    c2.metric("Positive (형광)", f"{pos_count}개")
+    c3.metric("형광 발현 비율", f"{percent:.1f}%")
 
-            for obj in objects:
-                if obj["type"] == "circle":
-                    # 원의 좌표 및 반지름 계산
-                    left = obj["left"] * scale_x
-                    top = obj["top"] * scale_y
-                    radius = obj["radius"] * scale_x
-                    
-                    center_x = int(left + radius)
-                    center_y = int(top + radius)
-                    r = int(radius)
-
-                    # 마스크 생성 및 평균값 추출
-                    mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.circle(mask, (center_x, center_y), r, 255, -1)
-                    mean_val = cv2.mean(img_array, mask=mask)
-                    green_avg = mean_val[1] # Green 채널
-
-                    is_positive = green_avg > threshold
-                    if is_positive:
-                        pos_count += 1
-                    
-                    results_data.append(is_positive)
-
-            # 통계 표시
-            total = len(objects)
-            percent = (pos_count / total) * 100 if total > 0 else 0
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("총 그린 우물", f"{total}개")
-            col2.metric("Positive (형광)", f"{pos_count}개")
-            col3.metric("형광 발현 비율", f"{percent:.1f}%")
-            
-            st.info("💡 팁: 원을 잘못 그렸다면 왼쪽 도구함의 쓰레기통 아이콘을 누르거나, 선택 모드(화살표)로 클릭 후 'Delete' 키를 누르세요.")
-        else:
-            st.warning("분석할 원을 하나 이상 그려주세요.")
+    # 결과 저장
+    res_bytes = cv2.imencode(".png", cv2.cvtColor(display_img, cv2.COLOR_RGB2BGR))[1].tobytes()
+    st.download_button("📸 분석 이미지 저장", data=res_bytes, file_name="grid_analysis.png")
+else:
+    st.info("사진을 업로드하면 격자 조절 화면이 나타납니다.")
