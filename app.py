@@ -41,4 +41,42 @@ if uploaded_file:
     neg_count = 0 # Negative 카운트 변수 추가
     total_wells = col_count * row_count
     
-    for r in range(
+    for r in range(row_count):
+        for c in range(col_count):
+            center_x = int(start_x + (c * gap_x))
+            center_y = int(start_y + (r * gap_y))
+            
+            if center_x < w and center_y < h:
+                mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.circle(mask, (center_x, center_y), radius, 255, -1)
+                mean_val = cv2.mean(img_rgb, mask=mask)
+                green_val = mean_val[1]
+                
+                # 판정 로직 및 색상 지정 (RGB 기준)
+                if green_val > threshold:
+                    pos_count += 1
+                    border_color = (0, 0, 255) # Positive: 파란색
+                else:
+                    neg_count += 1
+                    border_color = (255, 0, 0) # Negative: 빨간색
+                
+                cv2.circle(display_img, (center_x, center_y), radius, border_color, 1)
+
+    st.image(display_img, caption="분석 결과 (파랑: Positive / 빨강: Negative)", use_container_width=True)
+    
+    # 3. 리포트 (4열 구조로 변경)
+    percent = (pos_count / total_wells) * 100 if total_wells > 0 else 0
+    st.subheader("📊 분석 결과 요약")
+    
+    # 4개의 지표를 나란히 배치
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("총 우물 수", f"{total_wells}개")
+    c2.metric("Positive (파랑)", f"{pos_count}개")
+    c3.metric("Negative (빨강)", f"{neg_count}개") # 새로 추가된 항목
+    c4.metric("형광 발현 비율", f"{percent:.1f}%")
+
+    # 결과 저장
+    res_bytes = cv2.imencode(".png", cv2.cvtColor(display_img, cv2.COLOR_RGB2BGR))[1].tobytes()
+    st.download_button("📸 분석 이미지 저장", data=res_bytes, file_name="microwell_analysis_result.png")
+else:
+    st.info("👈 왼쪽에서 격자를 맞춘 후 사진을 올려주세요.")
