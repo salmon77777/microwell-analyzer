@@ -61,4 +61,84 @@ def get_auto_count(roi_gray, sens):
     y_p = np.mean(th_img, axis=1)
     def count_p(proj):
         limit = np.mean(proj) * sens
-        cnt, peak =
+        cnt, peak = 0, False
+        for v in proj:
+            if v > limit and not peak:
+                cnt += 1; peak = True
+            elif v < limit: peak = False
+        return cnt
+    return max(1, count_p(x_p)), max(1, count_p(y_p))
+
+# --- 4. 메인 화면 로직 ---
+uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
+
+if uploaded_file:
+    f_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img_bgr = cv2.imdecode(f_bytes, cv2.IMREAD_COLOR)
+    
+    if img_bgr is not None:
+        h, w = img_bgr.shape[:2]
+        # 회전 보정
+        M = cv2.getRotationMatrix2D((w//2, h//2), rotation, 1.0)
+        img_rot = cv2.warpAffine(img_bgr, M, (w, h))
+        img_rgb = cv2.cvtColor(img_rot, cv2.COLOR_BGR2RGB)
+        
+        tab1, tab2 = st.tabs(["📝 좌표 확인 (Red Guide)", "📊 분석 결과"])
+        
+        with tab1:
+            # 눈금자와 가이드라인이 있는 이미지 생성
+            ruler_view = draw_ruler_and_guide(img_rgb)
+            st.image(ruler_view, use_container_width=True, caption="빨간 중앙선을 기준으로 수평을 맞추고 눈금 좌표를 입력하세요.")
+            
+        with tab2:
+            # 4점 좌표 설정
+            pts = np.array([[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]], dtype=np.float32)
+            
+            # Well 개수 결정
+            if auto_mode:
+                M_p = cv2.getPerspectiveTransform(pts, np.array([[0,0],[1000,0],[1000,1000],[0,1000]], dtype=np.float32))
+                warped = cv2.cvtColor(cv2.warpPerspective(img_rot, M_p, (1000, 1000)), cv2.COLOR_BGR2GRAY)
+                f_cols, f_rows = get_auto_count(warped, sensitivity)
+            else:
+                f_cols, f_rows = manual_cols, manual_rows
+            
+            # 격자 생성 및 분석 시각화
+            res_img = img_rgb.copy()
+            pos_cnt = 0
+            for r in range(f_rows):
+                v_r = r/(f_rows-1) if f_rows > 1 else 0
+                lp, rp = (1-v_r)*pts[0] + v_r*pts[3], (1-v_r)*pts[1] + v_r*pts[2]
+                for c in range(f_cols):
+                    h_r = c/(f_cols-1) if f_cols > 1 else 0
+                    cp = (1-h_r)*lp + h_r*rp
+                    cx, cy = int(cp[0]), int(cp[1])
+                    if 0 <= cx < w and 0 <= cy < h:
+                        is_pos = img_rgb[cy, cx, 1] > threshold
+                        if is_pos: pos_cnt += 1
+                        # 원 테두리 두께 1로 얇게
+                        cv2.circle(res_img, (cx, cy), radius, (0,255,0) if is_pos else (255,0,0), 1)
+            
+            # 노란색 선택 영역 표시
+            cv2.polylines(res_img, [pts.astype(int)], True, (255, 255, 0), 2)
+            st.image(res_img, use_container_width=True)
+            
+            # 결과 지표 계산
+            total = f_cols * f_rows
+            ratio = (pos_cnt / total * 100) if total > 0 else 0
+            is_gmo = ratio >= gmo_thresh
+            
+            st.markdown("---")
+            st.info(f"📊 **Grid Info:** 가로(Column) **{f_cols}**개 × 세로(Row) **{f_rows}**개 (총 {total} Well)")
+
+            if is_gmo:
+                st.success(f"### 🧬 판정 결과: GMO Positive (발현율: {ratio:.1f}%)")
+            else:
+                st.error(f"### 🧬 판정 결과: Non-GMO (발현율: {ratio:.1f}%)")
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Well", f"{total}")
+            c2.metric("Positive", f"{pos_cnt}")
+            c3.metric("Ratio", f"{ratio:.1f}%")
+            c4.metric("Threshold", f"{gmo_thresh}%")
+else:
+    st.info("💡 분석을 시작하려면 사진을 업로드해 주세요.")
