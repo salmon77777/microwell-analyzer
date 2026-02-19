@@ -11,19 +11,19 @@ st.sidebar.header("🔄 1단계: 수평 보정")
 rotation = st.sidebar.slider("사진 기울기 조절", -10.0, 10.0, 0.0, step=0.1)
 
 st.sidebar.header("📍 2단계: 영역 좌표 설정")
-st.sidebar.info("이미지에 최적화된 기본값이 설정되었습니다.")
+st.sidebar.info("사용자 지정 눈금값으로 기본 좌표가 설정되었습니다.")
 
-# 사용자 요청 순서: 좌상 -> 우상 -> 좌하 -> 우하
 sc1, sc2 = st.sidebar.columns(2)
 
-# 이미지 분석 기반 추천 Default 값 적용
-tl_x = sc1.number_input("1. 좌상 X (Top-Left)", 0, 8000, 310)
-tl_y = sc2.number_input("1. 좌상 Y (Top-Left)", 0, 8000, 410)
+# 사용자 사진 기준 눈금값 적용
+# X축: 약 350 ~ 2750 / Y축: 약 450 ~ 2900
+tl_x = sc1.number_input("1. 좌상 X (Top-Left)", 0, 8000, 350)
+tl_y = sc2.number_input("1. 좌상 Y (Top-Left)", 0, 8000, 450)
 
 tr_x = sc1.number_input("2. 우상 X (Top-Right)", 0, 8000, 2750)
-tr_y = sc2.number_input("2. 우상 Y (Top-Right)", 0, 8000, 410)
+tr_y = sc2.number_input("2. 우상 Y (Top-Right)", 0, 8000, 450)
 
-bl_x = sc1.number_input("3. 좌하 X (Bottom-Left)", 0, 8000, 310)
+bl_x = sc1.number_input("3. 좌하 X (Bottom-Left)", 0, 8000, 350)
 bl_y = sc2.number_input("3. 좌하 Y (Bottom-Left)", 0, 8000, 2900)
 
 br_x = sc1.number_input("4. 우하 X (Bottom-Right)", 0, 8000, 2750)
@@ -34,7 +34,7 @@ auto_mode = st.sidebar.checkbox("Well 개수 자동 인식", value=True)
 manual_cols = st.sidebar.number_input("가로 Well (수동)", 1, 100, 23) if not auto_mode else 23
 manual_rows = st.sidebar.number_input("세로 Well (수동)", 1, 100, 24) if not auto_mode else 24
 
-radius = st.sidebar.slider("Well 반지름", 1, 30, 8) # 조금 더 잘 보이게 8로 조정
+radius = st.sidebar.slider("Well 반지름", 1, 30, 8)
 threshold = st.sidebar.slider("형광 임계값 (G)", 0, 255, 60)
 sensitivity = st.sidebar.slider("인식 민감도", 0.1, 2.0, 1.1)
 gmo_thresh = st.sidebar.slider("GMO 판정 기준 (%)", 0, 100, 50)
