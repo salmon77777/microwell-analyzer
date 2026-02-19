@@ -4,19 +4,19 @@ import numpy as np
 
 st.set_page_config(page_title="격자 복원형 분석기", layout="wide")
 st.title("🧬 격자 복원형 Microwell 분석기")
-st.info("신호가 없는(어두운) Well까지 격자 간격을 계산하여 자동으로 찾아냅니다.")
 
 # --- 사이드바 설정 ---
-st.sidebar.header("⚙️ 1. 인식 정밀도 (패턴 찾기)")
+st.sidebar.header("⚙️ 1. 인식 정밀도")
 block_size = st.sidebar.slider("이진화 블록 크기", 3, 99, 31, step=2)
 offset = st.sidebar.slider("이진화 보정치", 0, 50, 10)
 
-st.sidebar.header("📏 2. Well 크기 필터")
+st.sidebar.header("📏 2. Well 면적 필터")
 min_area = st.sidebar.slider("Well 최소 면적", 1, 500, 50)
 max_area = st.sidebar.slider("Well 최대 면적", 10, 2000, 800)
 
 st.sidebar.header("🧪 3. 판정 및 분석")
 threshold_g = st.sidebar.slider("형광 임계값 (G)", 0, 255, 60)
+# 복원 기능을 사용자가 끄고 켤 수 있게 함
 grid_fix = st.sidebar.checkbox("빈 Well 격자 자동 복원", value=True)
 
 # --- 메인 로직 ---
@@ -31,7 +31,7 @@ if uploaded_file:
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
         
-        # 1. 일차적 패턴 인식 (밝은 Well 찾기)
+        # 1. 일차적 패턴 인식
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block_size, offset)
         contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -44,37 +44,43 @@ if uploaded_file:
 
         if found_wells:
             found_wells = np.array(found_wells)
-            
-            # 2. 격자 복원 로직 (Grid Reconstruction)
-            if grid_fix and len(found_wells) > 10:
-                # 발견된 Well들의 좌표를 기반으로 격자 범위 추출
+            final_wells = []
+
+            # 2. 격자 복원 로직 (무한 루프 방지 안전장치 추가)
+            if grid_fix and len(found_wells) >= 5:
                 all_x = found_wells[:, 0]
                 all_y = found_wells[:, 1]
+                avg_r = int(np.mean(found_wells[:, 2]))
                 
-                # 평균 간격 계산 (X, Y축 각각)
-                # 정렬 후 차이값의 중앙값으로 간격 추측
-                dx = np.median(np.diff(np.unique(np.sort(all_x))))
-                dy = np.median(np.diff(np.unique(np.sort(all_y))))
+                # 중복되지 않는 좌표들 사이의 최소 간격 추정
+                ux = np.sort(np.unique(all_x))
+                uy = np.sort(np.unique(all_y))
                 
-                # 실제 격자 좌표 생성 (발견된 Well의 최소~최대 범위 내)
-                grid_x = np.arange(all_x.min(), all_x.max() + 1, dx)
-                grid_y = np.arange(all_y.min(), all_y.max() + 1, dy)
+                # 간격 계산 (최소 10픽셀 이상으로 제한하여 무한 루프 방지)
+                dx = max(10, np.median(np.diff(ux))) if len(ux) > 1 else 30
+                dy = max(10, np.median(np.diff(uy))) if len(uy) > 1 else 30
                 
-                final_wells = []
-                for gy in grid_y:
-                    for gx in grid_x:
-                        final_wells.append([int(gx), int(gy), int(np.mean(found_wells[:, 2]))])
+                # 격자 생성 (이미지 범위를 벗어나지 않도록 안전하게 생성)
+                start_x, end_x = all_x.min(), all_x.max()
+                start_y, end_y = all_y.min(), all_y.max()
+                
+                # 개수가 너무 많아지는 것을 방지 (최대 100x100)
+                num_cols = min(100, int((end_x - start_x) / dx) + 1)
+                num_rows = min(100, int((end_y - start_y) / dy) + 1)
+                
+                for r_idx in range(num_rows):
+                    for c_idx in range(num_cols):
+                        final_wells.append([int(start_x + c_idx * dx), int(start_y + r_idx * dy), avg_r])
             else:
-                final_wells = found_wells
+                final_wells = found_wells.tolist()
 
-            # 3. 최종 분석 및 시각화
+            # 3. 분석 및 시각화
             res_img = img_rgb.copy()
             pos_cnt = 0
             
             for cx, cy, r in final_wells:
-                # 좌표가 이미지 범위를 벗어나지 않게 처리
                 if 0 <= cx < w and 0 <= cy < h:
-                    # 노란색: 모든 Well (찾은 것 + 복원한 것)
+                    # 인식/복원된 모든 Well은 노란색 테두리
                     cv2.circle(res_img, (cx, cy), r, (255, 255, 0), 1)
                     
                     # 중심부 녹색값 체크
@@ -96,4 +102,4 @@ if uploaded_file:
             c2.metric("Positive Well", f"{pos_cnt}개")
             c3.metric("GMO 신호율", f"{ratio:.1f}%")
         else:
-            st.warning("먼저 밝은 Well들이 인식되도록 설정을 조절하세요.")
+            st.warning("먼저 Well들이 인식되도록 설정을 조절하세요.")
