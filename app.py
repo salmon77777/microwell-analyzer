@@ -3,17 +3,21 @@ import numpy as np
 import cv2
 from PIL import Image
 
-st.set_page_config(page_title="격자 복원형 분석기", layout="wide")
-st.title("🧬 격자 복원형 Microwell 분석기 (안정화 버전)")
+st.set_page_config(page_title="정밀 격자 제어기", layout="wide")
+st.title("📏 사용자 정의 격자 분석기")
+st.info("사이드바의 'Well 반지름'과 'Well 간격'을 조절하여 실제 사진의 구멍 크기와 맞추세요.")
 
-# --- 사이드바 설정 ---
-st.sidebar.header("⚙️ 1. 인식 설정")
-min_brightness = st.sidebar.slider("배경 노이즈 제거", 0, 255, 60)
-min_distance = st.sidebar.slider("Well 사이 최소 거리", 5, 100, 18)
+# --- 사이드바: 사용자가 직접 사이즈 결정 ---
+st.sidebar.header("📏 1. 격자 사이즈 설정")
+# 실제 Well의 크기
+well_radius = st.sidebar.slider("Well 표시 반지름", 2, 50, 10)
+# Well 중심과 다음 중심 사이의 거리
+spacing_x = st.sidebar.slider("가로 간격 (Pitch X)", 5.0, 100.0, 20.0, step=0.1)
+spacing_y = st.sidebar.slider("세로 간격 (Pitch Y)", 5.0, 100.0, 20.0, step=0.1)
 
-st.sidebar.header("🧪 2. 판정 및 격자 설정")
+st.sidebar.header("🧪 2. 판정 설정")
+min_brightness = st.sidebar.slider("배경 노이즈 제거", 0, 255, 40)
 threshold_g = st.sidebar.slider("GMO 양성 판정 기준", 0, 255, 80)
-grid_reconstruct = st.sidebar.checkbox("빈 공간 격자 복원 활성화", value=True)
 
 uploaded_file = st.file_uploader("사진을 선택하세요", type=['jpg', 'png', 'jpeg'])
 
@@ -22,7 +26,7 @@ if uploaded_file:
     img_rgb = np.array(image.convert("RGB"))
     h, w = img_rgb.shape[:2]
     
-    # 분석 속도를 위한 리사이즈
+    # 분석 기준 해상도 고정 (1000px 가로 기준)
     scale = 1000 / w
     target_w, target_h = 1000, int(h * scale)
     img_small = cv2.resize(img_rgb, (target_w, target_h))
@@ -30,84 +34,60 @@ if uploaded_file:
     green_ch = img_bgr[:,:,1]
     blurred = cv2.GaussianBlur(green_ch, (5, 5), 0)
     
-    # 1. 일차 탐지 (가장 밝은 지점들 찾기)
-    k_size = max(3, min_distance)
+    # 1. 기준점 찾기 (가장 밝은 웰 하나를 기준으로 격자 시작)
+    # 전체를 다 찾는게 아니라 '격자의 시작점'만 찾습니다.
+    k_size = int(well_radius * 2)
     if k_size % 2 == 0: k_size += 1
     local_max = cv2.dilate(blurred, np.ones((k_size, k_size), np.uint8), iterations=1)
     peak_mask = (blurred == local_max) & (blurred > min_brightness)
     y_p, x_p = np.where(peak_mask)
-    
-    found_pts = []
+
     if len(x_p) > 0:
-        used_mask = np.zeros((target_h, target_w), dtype=np.uint8)
-        sorted_idx = np.argsort(blurred[y_p, x_p])[::-1]
-        
-        for i in sorted_idx:
-            cx, cy = x_p[i], y_p[i]
-            if used_mask[cy, cx] > 0: continue
-            cv2.circle(used_mask, (cx, cy), int(min_distance * 0.7), 255, -1)
-            found_pts.append([cx, cy])
+        # 가장 밝은 점을 격자의 원점(Origin)으로 설정
+        idx = np.argmax(blurred[y_p, x_p])
+        origin_x, origin_y = x_p[idx], y_p[idx]
 
-    final_wells = []
-    # 2. 격자 복원 알고리즘 (에러 방지 로직 포함)
-    if grid_reconstruct and len(found_pts) > 10:
-        pts = np.array(found_pts)
-        
-        # X, Y 간격 추정 (중앙값 사용)
-        def estimate_spacing(coords):
-            coords_unique = np.sort(np.unique(coords))
-            diffs = np.diff(coords_unique)
-            # 너무 좁은 간격은 노이즈로 간주하고 필터링
-            valid_diffs = diffs[diffs > min_distance * 0.5]
-            return np.median(valid_diffs) if len(valid_diffs) > 0 else min_distance
+        # 2. 사용자 설정 간격으로 격자망 생성 (이미지 전체 영역)
+        res_img = img_small.copy()
+        pos_cnt = 0
+        total_count = 0
 
-        dx = estimate_spacing(pts[:, 0])
-        dy = estimate_spacing(pts[:, 1])
+        # 원점으로부터 좌우/상하로 격자 전개
+        # 이미지 전체를 덮도록 범위를 계산합니다.
+        x_start = origin_x % spacing_x
+        y_start = origin_y % spacing_y
         
-        # 격자 범위 설정
-        min_x, max_x = pts[:, 0].min(), pts[:, 0].max()
-        min_y, max_y = pts[:, 1].min(), pts[:, 1].max()
-        
-        # 격자망 생성
-        for ty in np.arange(min_y, max_y + 0.1, dy):
-            for tx in np.arange(min_x, max_x + 0.1, dx):
-                final_wells.append([int(tx), int(ty)])
-    else:
-        final_wells = found_pts
-
-    # 3. 최종 분석 및 시각화
-    res_img = img_small.copy()
-    pos_cnt = 0
-    total_count = 0
-
-    if len(final_wells) > 0:
-        for cx, cy in final_wells:
-            if 0 <= cx < target_w and 0 <= cy < target_h:
+        for ty in np.arange(y_start, target_h, spacing_y):
+            for tx in np.arange(x_start, target_w, spacing_x):
+                cx, cy = int(tx), int(ty)
+                
+                # 가장자리 마진 제외
+                if cx < 5 or cx > target_w-5 or cy < 5 or cy > target_h-5:
+                    continue
+                
                 total_count += 1
-                # 격자 중심의 밝기 확인
+                # 격자 포인트의 밝기 분석
                 val = blurred[cy, cx]
                 is_pos = val > threshold_g
                 
                 if is_pos:
                     pos_cnt += 1
-                    # Positive: 초록색 원 (테두리 두껍게)
-                    cv2.circle(res_img, (cx, cy), 7, (0, 255, 0), 2)
+                    # Positive: 초록색 원
+                    cv2.circle(res_img, (cx, cy), well_radius, (0, 255, 0), 2)
                 else:
-                    # Negative: 노란색 원 (테두리 얇게)
-                    cv2.circle(res_img, (cx, cy), 7, (255, 255, 0), 1)
+                    # Negative: 노란색 원
+                    cv2.circle(res_img, (cx, cy), well_radius, (255, 255, 0), 1)
 
         st.image(res_img, use_container_width=True)
         
-        ratio = (pos_cnt / total_count * 100)
+        # 결과 대시보드
+        ratio = (pos_cnt / total_count * 100) if total_count > 0 else 0
         st.markdown("---")
         c1, c2, c3 = st.columns(3)
-        c1.metric("전체 Well (격자 포함)", f"{total_count}개")
+        c1.metric("격자 내 전체 Well", f"{total_count}개")
         c2.metric("Positive Well", f"{pos_cnt}개")
         c3.metric("신호율", f"{ratio:.1f}%")
         
-        if ratio >= 50:
-            st.success("🧬 판정 결과: GMO Positive")
-        else:
-            st.error("🧬 판정 결과: Non-GMO")
+        st.caption("💡 팁: 노란색 원이 실제 Well보다 크거나 작으면 '반지름'을, 간격이 어긋나면 '가로/세로 간격'을 조절하세요.")
     else:
-        st.warning("Well을 탐지하지 못했습니다. 사이드바의 '배경 노이즈 제거'를 낮춰보세요.")
+        st.warning("사진에서 Well의 위치를 파악할 수 없습니다. '배경 노이즈 제거'를 낮춰주세요.")
