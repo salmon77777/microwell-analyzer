@@ -11,28 +11,27 @@ st.sidebar.header("🔄 1단계: 수평 보정")
 rotation = st.sidebar.slider("사진 기울기 조절", -10.0, 10.0, 0.0, step=0.1)
 
 st.sidebar.header("📍 2단계: 영역 좌표 설정")
-st.sidebar.info("사용자 지정 눈금값으로 기본 좌표가 설정되었습니다.")
+st.sidebar.info("고정 좌표 (18, 21), (693, 22) 등이 강제 적용되었습니다.")
 
 sc1, sc2 = st.sidebar.columns(2)
 
-# 사용자 사진 기준 눈금값 적용
-# X축: 약 350 ~ 2750 / Y축: 약 450 ~ 2900
-tl_x = sc1.number_input("1. 좌상 X (Top-Left)", 0, 8000, 350)
-tl_y = sc2.number_input("1. 좌상 Y (Top-Left)", 0, 8000, 450)
+# key 파라미터를 추가하여 이전 캐시를 무시하고 18, 21, 693... 등의 값을 강제로 표시합니다.
+tl_x = sc1.number_input("1. 좌상 X (Top-Left)", 0, 8000, 18, key="tlx_v2")
+tl_y = sc2.number_input("1. 좌상 Y (Top-Left)", 0, 8000, 21, key="tly_v2")
 
-tr_x = sc1.number_input("2. 우상 X (Top-Right)", 0, 8000, 2750)
-tr_y = sc2.number_input("2. 우상 Y (Top-Right)", 0, 8000, 450)
+tr_x = sc1.number_input("2. 우상 X (Top-Right)", 0, 8000, 693, key="trx_v2")
+tr_y = sc2.number_input("2. 우상 Y (Top-Right)", 0, 8000, 22, key="try_v2")
 
-bl_x = sc1.number_input("3. 좌하 X (Bottom-Left)", 0, 8000, 350)
-bl_y = sc2.number_input("3. 좌하 Y (Bottom-Left)", 0, 8000, 2900)
+bl_x = sc1.number_input("3. 좌하 X (Bottom-Left)", 0, 8000, 19, key="blx_v2")
+bl_y = sc2.number_input("3. 좌하 Y (Bottom-Left)", 0, 8000, 696, key="bly_v2")
 
-br_x = sc1.number_input("4. 우하 X (Bottom-Right)", 0, 8000, 2750)
-br_y = sc2.number_input("4. 우하 Y (Bottom-Right)", 0, 8000, 2900)
+br_x = sc1.number_input("4. 우하 X (Bottom-Right)", 0, 8000, 695, key="brx_v2")
+br_y = sc2.number_input("4. 우하 Y (Bottom-Right)", 0, 8000, 694, key="bry_v2")
 
 st.sidebar.header("🔢 3단계: Well & 분석 설정")
 auto_mode = st.sidebar.checkbox("Well 개수 자동 인식", value=True)
-manual_cols = st.sidebar.number_input("가로 Well (수동)", 1, 100, 23) if not auto_mode else 23
-manual_rows = st.sidebar.number_input("세로 Well (수동)", 1, 100, 24) if not auto_mode else 24
+manual_cols = st.sidebar.number_input("가로 Well (수동)", 1, 150, 23) if not auto_mode else 23
+manual_rows = st.sidebar.number_input("세로 Well (수동)", 1, 150, 24) if not auto_mode else 24
 
 radius = st.sidebar.slider("Well 반지름", 1, 30, 8)
 threshold = st.sidebar.slider("형광 임계값 (G)", 0, 255, 60)
@@ -43,7 +42,7 @@ gmo_thresh = st.sidebar.slider("GMO 판정 기준 (%)", 0, 100, 50)
 def draw_ruler_and_guide(img):
     h, w = img.shape[:2]
     r_img = img.copy()
-    cv2.line(r_img, (0, h//2), (w, h//2), (255, 0, 0), 2) # 중앙 Red 가이드선
+    cv2.line(r_img, (0, h//2), (w, h//2), (255, 0, 0), 2)
     cv2.line(r_img, (w//2, 0), (w//2, h), (255, 0, 0), 2)
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = max(h, w) / 2000.0
@@ -74,10 +73,8 @@ if uploaded_file:
             st.image(draw_ruler_and_guide(img_rgb), use_container_width=True)
             
         with tab2:
-            # 입력 좌표 (정렬 순서 준수)
             src_pts = np.array([[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]], dtype="float32")
             
-            # Well 개수 인식 (원근 보정 적용)
             target_size = 1200
             dst_pts = np.array([[0, 0], [target_size, 0], [target_size, target_size], [0, target_size]], dtype="float32")
             M_p = cv2.getPerspectiveTransform(src_pts, dst_pts)
@@ -98,7 +95,6 @@ if uploaded_file:
             else:
                 f_cols, f_rows = manual_cols, manual_rows
 
-            # 분석 시각화
             res_img = img_rgb.copy()
             pos_cnt = 0
             for r in range(f_rows):
