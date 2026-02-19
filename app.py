@@ -2,33 +2,32 @@ import streamlit as st
 import cv2
 import numpy as np
 
-# 페이지 설정 (전체 화면 넓게 사용)
+# 1. 페이지 설정 및 제목
 st.set_page_config(page_title="Microwell Precision Analyzer", layout="wide")
 st.title("🔬 Microwell Grid & GMO Analyzer")
 
-# --- 1. 사이드바: 설정 영역 (공간 최적화) ---
+# --- 사이드바 설정 ---
 st.sidebar.header("🔄 1단계: 수평 보정")
 rotation = st.sidebar.slider("사진 기울기 조절", -10.0, 10.0, 0.0, step=0.1)
 
 st.sidebar.header("📍 2단계: 모서리 좌표 입력")
-# 사이드바 내부에서도 컬럼을 나누어 입력창 크기를 줄임
 sc1, sc2 = st.sidebar.columns(2)
-tl_x = sc1.number_input("좌상 X", 0, 5000, 150)
-tl_y = sc2.number_input("좌상 Y", 0, 5000, 200)
-tr_x = sc1.number_input("우상 X", 0, 5000, 2300)
-tr_y = sc2.number_input("우상 Y", 0, 5000, 200)
-bl_x = sc1.number_input("좌하 X", 0, 5000, 150)
-bl_y = sc2.number_input("좌하 Y", 0, 5000, 2300)
-br_x = sc1.number_input("우하 X", 0, 5000, 2300)
-br_y = sc2.number_input("우하 Y", 0, 5000, 2300)
+tl_x = sc1.number_input("좌상 X", 0, 8000, 150)
+tl_y = sc2.number_input("좌상 Y", 0, 8000, 200)
+tr_x = sc1.number_input("우상 X", 0, 8000, 2300)
+tr_y = sc2.number_input("우상 Y", 0, 8000, 200)
+bl_x = sc1.number_input("좌하 X", 0, 8000, 150)
+bl_y = sc2.number_input("좌하 Y", 0, 8000, 2300)
+br_x = sc1.number_input("우하 X", 0, 8000, 2300)
+br_y = sc2.number_input("우하 Y", 0, 8000, 2300)
 
 st.sidebar.header("🔢 3단계: Well 개수 설정")
 auto_mode = st.sidebar.checkbox("Well 개수 자동 인식", value=True)
 manual_cols, manual_rows = 23, 24
 if not auto_mode:
     mc1, mc2 = st.sidebar.columns(2)
-    manual_cols = mc1.number_input("가로 Well", 1, 100, 23)
-    manual_rows = mc2.number_input("세로 Well", 1, 100, 24)
+    manual_cols = mc1.number_input("가로 Well", 1, 150, 23)
+    manual_rows = mc2.number_input("세로 Well", 1, 150, 24)
 
 st.sidebar.header("🧪 4단계: 판정 및 크기")
 radius = st.sidebar.slider("Well 반지름", 1, 30, 5)
@@ -38,45 +37,105 @@ sensitivity = st.sidebar.slider("인식 민감도", 0.1, 2.0, 1.0, step=0.1)
 st.sidebar.header("🧬 5단계: GMO 판정")
 gmo_thresh = st.sidebar.slider("GMO 판정 기준 (%)", 0, 100, 50)
 
-# --- 2. 유틸리티 함수 ---
+# --- 함수 정의 ---
 def draw_ruler_and_guide(img):
     h, w = img.shape[:2]
-    ruler_img = img.copy()
-    guide_color = (0, 0, 255) # 빨간색 가이드라인
-    cv2.line(ruler_img, (0, h//2), (w, h//2), guide_color, 2)
-    cv2.line(ruler_img, (w//2, 0), (w//2, h), guide_color, 2)
-    
+    r_img = img.copy()
+    # 중앙 가이드라인 (Red)
+    cv2.line(r_img, (0, h//2), (w, h//2), (255, 0, 0), 2) # RGB이므로 Red는 (255,0,0)
+    cv2.line(r_img, (w//2, 0), (w//2, h), (255, 0, 0), 2)
+    # 눈금자
     font = cv2.FONT_HERSHEY_SIMPLEX
-    for x in range(0, w, 200): # 눈금 간격 조정
-        cv2.line(ruler_img, (x, 0), (x, 50), (255, 255, 255), 3)
-        cv2.putText(ruler_img, str(x), (x+10, 45), font, 1.2, (255, 255, 255), 3)
+    scale = max(h, w) / 2000.0 # 이미지 크기에 따른 폰트 크기 자동 조절
+    for x in range(0, w, 200):
+        cv2.line(r_img, (x, 0), (x, int(40*scale)), (255, 255, 255), int(3*scale))
+        cv2.putText(r_img, str(x), (x, int(80*scale)), font, scale, (255, 255, 255), int(2*scale))
     for y in range(0, h, 200):
-        cv2.line(ruler_img, (0, y), (50, y), (255, 255, 255), 3)
-        cv2.putText(ruler_img, str(y), (10, y-10), font, 1.2, (255, 255, 255), 3)
-    return ruler_img
+        cv2.line(r_img, (0, y), (int(40*scale), y), (255, 255, 255), int(3*scale))
+        cv2.putText(r_img, str(y), (int(10*scale), y), font, scale, (255, 255, 255), int(2*scale))
+    return r_img
 
 def get_auto_count(roi_gray, sens):
-    _, thresh_img = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    x_proj = np.mean(thresh_img, axis=0)
-    y_proj = np.mean(thresh_img, axis=1)
-    def count_peaks(proj):
-        p_thresh = np.mean(proj) * sens
-        peaks, in_p = 0, False
+    _, th_img = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    x_p = np.mean(th_img, axis=0)
+    y_p = np.mean(th_img, axis=1)
+    def count_p(proj):
+        limit = np.mean(proj) * sens
+        cnt, peak = 0, False
         for v in proj:
-            if v > p_thresh and not in_p:
-                peaks += 1; in_p = True
-            elif v < p_thresh: in_p = False
-        return peaks
-    return max(1, count_peaks(x_proj)), max(1, count_peaks(y_proj))
+            if v > limit and not peak:
+                cnt += 1; peak = True
+            elif v < limit: peak = False
+        return cnt
+    return max(1, count_p(x_p)), max(1, count_p(y_p))
 
-# --- 3. 메인 화면 로직 ---
+# --- 메인 로직 ---
 uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    raw_img = cv2.imdecode(file_bytes, 1)
+    # 이미지 읽기
+    f_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img_bgr = cv2.imdecode(f_bytes, cv2.IMREAD_COLOR)
     
-    if raw_img is not None:
-        h, w = raw_img.shape[:2]
-        M_rot = cv2.getRotationMatrix2D((w//2, h//2), rotation, 1.0)
-        img = cv2.warpAffine(raw_img, M_rot, (w, h))
+    if img_bgr is not None:
+        # 1. 회전
+        h, w = img_bgr.shape[:2]
+        M = cv2.getRotationMatrix2D((w//2, h//2), rotation, 1.0)
+        img_rot = cv2.warpAffine(img_bgr, M, (w, h))
+        img_rgb = cv2.cvtColor(img_rot, cv2.COLOR_BGR2RGB)
+        
+        # 2. 탭 생성
+        tab1, tab2 = st.tabs(["📝 좌표/수평 확인 (Red Guide)", "📊 분석 결과"])
+        
+        with tab1:
+            ruler_view = draw_ruler_and_guide(img_rgb)
+            st.image(ruler_view, use_container_width=True, caption="Red Line을 기준으로 수평을 맞추고 좌표를 읽으세요.")
+            
+        with tab2:
+            # 좌표 및 격자 계산
+            pts = np.array([[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]], dtype=np.float32)
+            
+            if auto_mode:
+                M_p = cv2.getPerspectiveTransform(pts, np.array([[0,0],[1000,0],[1000,1000],[0,1000]], dtype=np.float32))
+                warped = cv2.cvtColor(cv2.warpPerspective(img_rot, M_p, (1000, 1000)), cv2.COLOR_BGR2GRAY)
+                f_cols, f_rows = get_auto_count(warped, sensitivity)
+            else:
+                f_cols, f_rows = manual_cols, manual_rows
+            
+            # 분석 및 시각화
+            res_img = img_rgb.copy()
+            pos_cnt = 0
+            for r in range(f_rows):
+                v_r = r/(f_rows-1) if f_rows > 1 else 0
+                lp, rp = (1-v_r)*pts[0] + v_r*pts[3], (1-v_r)*pts[1] + v_r*pts[2]
+                for c in range(f_cols):
+                    h_r = c/(f_cols-1) if f_cols > 1 else 0
+                    cp = (1-h_r)*lp + h_r*rp
+                    cx, cy = int(cp[0]), int(cp[1])
+                    if 0 <= cx < w and 0 <= cy < h:
+                        is_pos = img_rgb[cy, cx, 1] > threshold
+                        if is_pos: pos_cnt += 1
+                        cv2.circle(res_img, (cx, cy), radius, (0,255,0) if is_pos else (255,0,0), 2)
+            
+            cv2.polylines(res_img, [pts.astype(int)], True, (255, 255, 0), 3)
+            st.image(res_img, use_container_width=True)
+            
+            # 판정 결과 대시보드
+            total = f_cols * f_rows
+            ratio = (pos_cnt / total * 100) if total > 0 else 0
+            is_gmo = ratio >= gmo_thresh
+            
+            st.markdown("---")
+            if is_gmo:
+                st.success(f"### 🧬 판정 결과: GMO Positive (신호율: {ratio:.1f}%)")
+            else:
+                st.error(f"### 🧬 판정 결과: Non-GMO (신호율: {ratio:.1f}%)")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("전체 Well 수", f"{total}개")
+            c2.metric("Positive Well", f"{pos_cnt}개")
+            c3.metric("판정 기준", f"{gmo_thresh}%")
+    else:
+        st.error("이미지를 해석할 수 없습니다. 파일 형식을 확인하세요.")
+else:
+    st.info("💡 위 버튼을 통해 사진을 업로드하면 분석이 시작됩니다.")
