@@ -3,95 +3,104 @@ import numpy as np
 import cv2
 from PIL import Image
 
-st.set_page_config(page_title="정밀 Well 분석기", layout="wide")
-st.title("🔬 Microwell 정밀 분석기 (에러 수정 및 개수 최적화)")
+st.set_page_config(page_title="격자 복원형 분석기", layout="wide")
+st.title("🧬 격자 복원형 Microwell 분석기")
+st.info("보이는 Well의 위치를 분석해 신호가 없는 빈 칸까지 모두 찾아냅니다.")
 
-# --- 사이드바: 노이즈 및 개수 조절 ---
-st.sidebar.header("⚙️ 인식 설정")
-# 1. 배경 제거: 5만 개씩 잡힌다면 이 값을 70~100까지 높이세요.
-min_brightness = st.sidebar.slider("배경 노이즈 제거 (최소 밝기)", 0, 255, 60)
-# 2. Well 간격: Well 하나에 여러 원이 생긴다면 이 값을 높이세요.
+# --- 사이드바 설정 ---
+st.sidebar.header("⚙️ 1. 인식 설정 (패턴 찾기)")
+min_brightness = st.sidebar.slider("배경 노이즈 제거", 0, 255, 60)
 min_distance = st.sidebar.slider("Well 사이 최소 거리", 5, 100, 15)
-# 3. 판정 기준
+
+st.sidebar.header("🧪 2. 판정 및 격자 설정")
 threshold_g = st.sidebar.slider("GMO 양성 판정 기준", 0, 255, 80)
+grid_reconstruct = st.sidebar.checkbox("빈 공간 격자 복원 활성화", value=True)
 
 uploaded_file = st.file_uploader("사진을 선택하세요", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # 1. 이미지 로드 및 리사이즈
     image = Image.open(uploaded_file)
     img_rgb = np.array(image.convert("RGB"))
     h, w = img_rgb.shape[:2]
     
     scale = 1000 / w
-    target_w = 1000
-    target_h = int(h * scale)
+    target_w, target_h = 1000, int(h * scale)
     img_small = cv2.resize(img_rgb, (target_w, target_h))
     img_bgr = cv2.cvtColor(img_small, cv2.COLOR_RGB2BGR)
-    
-    # 2. Green 채널 노이즈 제거
     green_ch = img_bgr[:,:,1]
     blurred = cv2.GaussianBlur(green_ch, (5, 5), 0)
     
-    # 3. 피크 탐색 (고속 Dilate 방식)
+    # 1. 1차 탐지: 보이는(밝은) Well들 먼저 찾기
     k_size = max(3, min_distance)
     if k_size % 2 == 0: k_size += 1
-    kernel = np.ones((k_size, k_size), np.uint8)
-    
-    local_max = cv2.dilate(blurred, kernel, iterations=1)
+    local_max = cv2.dilate(blurred, np.ones((k_size, k_size), np.uint8), iterations=1)
     peak_mask = (blurred == local_max) & (blurred > min_brightness)
-    y_coords, x_coords = np.where(peak_mask)
+    y_p, x_p = np.where(peak_mask)
     
-    # 4. 중복 제거 및 결과 그리기
-    res_img = img_small.copy()
-    valid_pts = []
-    pos_cnt = 0
-    
-    # [에러 수정된 마스크] uint8 타입으로 명시적 생성
+    # 중복 제거 후 유효한 Well 좌표 리스트 생성
+    found_pts = []
     used_mask = np.zeros((target_h, target_w), dtype=np.uint8)
+    sorted_idx = np.argsort(blurred[y_p, x_p])[::-1]
     
-    # 밝기 순으로 정렬하여 신뢰도 높은 점부터 선점
-    sorted_idx = np.argsort(blurred[y_coords, x_coords])[::-1]
-
     for i in sorted_idx:
-        cx, cy = x_coords[i], y_coords[i]
-        
-        # 이미 처리된 영역(used_mask가 255인 곳)이면 건너뜀
-        if used_mask[cy, cx] > 0:
-            continue
-        
-        # [에러 해결] used_mask에 원을 그려 주변 중복 탐지 방지
+        cx, cy = x_p[i], y_p[i]
+        if used_mask[cy, cx] > 0: continue
         cv2.circle(used_mask, (cx, cy), int(min_distance * 0.8), 255, -1)
-        
-        valid_pts.append((cx, cy))
-        
-        # 형광 판정
-        val = blurred[cy, cx]
-        is_pos = val > threshold_g
-        
-        if is_pos:
-            pos_cnt += 1
-            # 양성: 두꺼운 초록색 테두리
-            cv2.circle(res_img, (cx, cy), 7, (0, 255, 0), 2)
-        else:
-            # 음성: 얇은 노란색 테두리
-            cv2.circle(res_img, (cx, cy), 7, (255, 255, 0), 1)
+        found_pts.append([cx, cy])
 
-    # 5. 결과 시각화
+    # 2. 격자 복원 로직 (Grid Reconstruction)
+    final_wells = []
+    if grid_reconstruct and len(found_pts) > 20:
+        pts = np.array(found_pts)
+        # X, Y 좌표별로 정렬하여 평균 간격 추출
+        ux = np.sort(pts[:, 0])
+        uy = np.sort(pts[:, 1])
+        
+        # 델타(간격)의 중앙값 계산 (노이즈에 강함)
+        dx = np.median(np.diff(ux)[np.diff(ux) > min_distance*0.8])
+        dy = np.median(np.diff(uy)[np.diff(uy) > min_distance*0.8])
+        
+        # 실제 격자 좌표 생성 (발견된 영역 내에서)
+        min_x, max_x = pts[:, 0].min(), pts[:, 0].max()
+        min_y, max_y = pts[:, 1].min(), pts[:, 1].max()
+        
+        # 안전장치가 포함된 격자 루프
+        for ty in np.arange(min_y, max_y + 1, dy):
+            for tx in np.arange(min_x, max_x + 1, dx):
+                final_wells.append([int(tx), int(ty)])
+    else:
+        final_wells = found_pts
+
+    # 3. 최종 판정 및 시각화
+    res_img = img_small.copy()
+    pos_cnt = 0
+    analyzed_count = 0
+
+    for cx, cy in final_wells:
+        if 0 <= cx < target_w and 0 <= cy < target_h:
+            analyzed_count += 1
+            # 해당 좌표 밝기 확인
+            val = blurred[cy, cx]
+            is_pos = val > threshold_g
+            
+            if is_pos:
+                pos_cnt += 1
+                # Positive: 초록색 두꺼운 원
+                cv2.circle(res_img, (cx, cy), 7, (0, 255, 0), 2)
+            else:
+                # Negative: 노란색 얇은 원 (신호가 없어도 그 자리에 그려짐)
+                cv2.circle(res_img, (cx, cy), 7, (255, 255, 0), 1)
+
+    # 4. 결과 출력
     st.image(res_img, use_container_width=True)
     
-    total = len(valid_pts)
-    if total > 0:
-        ratio = (pos_cnt / total * 100)
+    if analyzed_count > 0:
+        ratio = (pos_cnt / analyzed_count * 100)
         st.markdown("---")
         c1, c2, c3 = st.columns(3)
-        c1.metric("실제 탐지된 Well", f"{total}개")
+        c1.metric("전체 Well (격자 복원 포함)", f"{analyzed_count}개")
         c2.metric("Positive Well", f"{pos_cnt}개")
         c3.metric("신호율", f"{ratio:.1f}%")
         
-        if ratio >= 50:
-            st.success("🧬 판정 결과: GMO Positive")
-        else:
-            st.error("🧬 판정 결과: Non-GMO")
-    else:
-        st.warning("Well이 감지되지 않았습니다. '배경 노이즈 제거' 값을 낮춰보세요.")
+        # 판정 결과 안내
+        st.info(f"💡 현재 전체 {analyzed_count}개의 Well 중 {pos_cnt}개에서 신호가 감지되었습니다.")
