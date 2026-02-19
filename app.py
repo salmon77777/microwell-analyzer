@@ -3,82 +3,96 @@ import numpy as np
 import cv2
 from PIL import Image
 
-# 1. 페이지 설정
-st.set_page_config(page_title="Well 분석기", layout="wide")
-st.title("🔬 Microwell 피크 분석기")
+st.set_page_config(page_title="오브젝트 분석기", layout="wide")
+st.title("🎯 오브젝트 기반 고속 Well 분석기")
 
-# --- 사이드바 설정 ---
-st.sidebar.header("⚙️ 인식 설정")
-peak_min_val = st.sidebar.slider("최소 밝기(배경 제거)", 0, 255, 30)
-min_dist = st.sidebar.slider("Well 간 최소 거리", 1, 100, 20)
-well_r = st.sidebar.slider("표시 반지름", 1, 50, 12)
-threshold_g = st.sidebar.slider("형광 임계값(Positive)", 0, 255, 65)
+# --- 사이드바: 픽셀 대신 '크기'와 '모양'으로 제어 ---
+st.sidebar.header("📦 오브젝트 필터")
+st.sidebar.info("픽셀을 훑지 않고 덩어리(Object)를 직접 찾습니다.")
+
+min_area = st.sidebar.slider("Well 최소 면적", 10, 500, 50)
+max_area = st.sidebar.slider("Well 최대 면적", 500, 5000, 1500)
+circularity_threshold = st.sidebar.slider("원형도 (1에 가까울수록 정원)", 0.1, 1.0, 0.5)
+
+st.sidebar.header("🧪 판정 설정")
+threshold_g = st.sidebar.slider("형광 임계값 (평균 G)", 0, 255, 70)
 
 # --- 메인 로직 ---
-uploaded_file = st.file_uploader("사진을 선택하세요 (스마트폰 사진 가능)", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("사진을 선택하세요", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    # [수정] PIL을 사용하여 안전하게 이미지 로드
+    # 1. 이미지 로드 (속도를 위해 적당한 크기로 리사이즈)
     image = Image.open(uploaded_file)
     img_rgb = np.array(image.convert("RGB"))
+    h, w = img_rgb.shape[:2]
     
-    # 분석을 위해 OpenCV 포맷(BGR)으로 복사
+    # 분석 속도를 위해 가로 1200px 기준 최적화
+    if w > 1200:
+        new_w = 1200
+        new_h = int(h * (1200 / w))
+        img_rgb = cv2.resize(img_rgb, (new_w, new_h))
+        h, w = new_h, new_w
+
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    h, w = img_bgr.shape[:2]
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     
-    # Green 채널 추출
-    green_ch = img_bgr[:,:,1]
+    # 2. 이진화 (오브젝트 추출 준비)
+    # 블러로 노이즈를 지우고 적응형 이진화로 덩어리 경계선을 땁니다.
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 21, 10)
     
-    # 픽셀 피크 탐색 (안정적인 dilate 방식)
-    kernel_size = max(3, min_dist if min_dist % 2 != 0 else min_dist + 1)
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    local_max = cv2.dilate(green_ch, kernel, iterations=1)
-    peak_mask = (green_ch == local_max) & (green_ch > peak_min_val)
-    
-    y_coords, x_coords = np.where(peak_mask)
+    # 3. 덩어리(Contour) 찾기 - 이 방식이 픽셀 루프보다 훨씬 빠릅니다.
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     res_img = img_rgb.copy()
     valid_wells = []
     pos_cnt = 0
-    centers = []
 
-    # 중복 제거 및 분석
-    for cx, cy in zip(x_coords, y_coords):
-        if cx < 5 or cx > w-5 or cy < 5 or cy > h-5:
-            continue
-        
-        too_close = False
-        for ox, oy in centers:
-            if np.sqrt((cx-ox)**2 + (cy-oy)**2) < min_dist:
-                too_close = True
-                break
-        if too_close: continue
-        
-        centers.append((cx, cy))
-        valid_wells.append((cx, cy))
-        
-        is_pos = green_ch[cy, cx] > threshold_g
-        if is_pos:
-            pos_cnt += 1
-        
-        # 노란색 원과 초록색 점 그리기
-        cv2.circle(res_img, (cx, cy), well_r, (255, 255, 0), 2) # 노란색 테두리
-        if is_pos:
-            cv2.circle(res_img, (cx, cy), max(1, int(well_r*0.5)), (0, 255, 0), -1)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        # 면적 필터링
+        if min_area < area < max_area:
+            # 원형도 계산 (진짜 Well인지 판별)
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0: continue
+            circularity = 4 * np.pi * (area / (perimeter * perimeter))
+            
+            if circularity > circularity_threshold:
+                # Well의 중심과 반지름 계산
+                (cx, cy), r = cv2.minEnclosingCircle(cnt)
+                cx, cy, r = int(cx), int(cy), int(r)
+                
+                # 가장자리 잘린 것 제외
+                if cx < 5 or cx > w-5 or cy < 5 or cy > h-5:
+                    continue
+                
+                # 해당 오브젝트 영역의 평균 녹색값 추출
+                mask = np.zeros(gray.shape, dtype=np.uint8)
+                cv2.drawContours(mask, [cnt], -1, 255, -1)
+                mean_val = cv2.mean(img_bgr[:,:,1], mask=mask)[0]
+                
+                is_pos = mean_val > threshold_g
+                if is_pos:
+                    pos_cnt += 1
+                
+                # 시각화
+                color = (0, 255, 0) if is_pos else (255, 255, 0)
+                cv2.drawContours(res_img, [cnt], -1, color, 2)
+                valid_wells.append((cx, cy))
 
-    # [수정] 이미지 출력 방식 변경
-    st.image(res_img, caption="분석 결과 화면", use_container_width=True)
+    # 4. 결과 출력
+    st.image(res_img, use_container_width=True)
     
     total = len(valid_wells)
     if total > 0:
         ratio = (pos_cnt / total * 100)
-        st.markdown("---")
+        st.markdown(f"### 분석 결과: {'GMO Positive' if ratio >= 50 else 'Non-GMO'}")
         c1, c2, c3 = st.columns(3)
-        c1.metric("전체 Well", f"{total}개")
-        c2.metric("Positive", f"{pos_cnt}개")
+        c1.metric("탐지된 Well", f"{total}개")
+        c2.metric("Positive Well", f"{pos_cnt}개")
         c3.metric("신호율", f"{ratio:.1f}%")
     else:
-        st.warning("설정값 내에서 Well을 찾지 못했습니다. '최소 밝기'를 낮춰보세요.")
-
-else:
-    st.info("스마트폰으로 촬영한 Microwell 사진을 업로드해 주세요.")
+        st.warning("오브젝트를 찾지 못했습니다. '최소 면적'을 낮추거나 '원형도'를 조절해 보세요.")
+        with st.expander("인식 과정 보기"):
+            st.image(thresh, caption="이진화된 이미지 (하얀 덩어리가 Well입니다)")
