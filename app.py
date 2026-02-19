@@ -95,4 +95,21 @@ if uploaded_file:
                 h_r = c / (auto_cols - 1) if auto_cols > 1 else 0
                 pt = (1-h_r)*line_l + h_r*line_r
                 cx, cy = int(pt[0]), int(pt[1])
-                if 0 <= cx
+                if 0 <= cx < w and 0 <= cy < h:
+                    g_val = display_img[cy, cx, 1]
+                    is_pos = g_val > threshold
+                    if is_pos: pos_count += 1
+                    cv2.circle(display_img, (cx, cy), 5, (0, 255, 0) if is_pos else (255, 0, 0), 1)
+
+        # 가이드라인 표시
+        cv2.polylines(display_img, [pts_src.astype(int)], True, (255, 255, 0), 2)
+
+        # 화면 출력 (눈금자 이미지와 분석 이미지 비교 선택 가능하게)
+        tab1, tab2 = st.tabs(["📝 좌표 확인용 (눈금자)", "📊 분석 결과"])
+        with tab1:
+            st.image(ruler_guide_img, caption="이미지의 숫자를 보고 사이드바에 입력하세요", use_container_width=True)
+        with tab2:
+            st.image(display_img, caption=f"감지된 격자: {auto_cols} x {auto_rows}", use_container_width=True)
+            
+            total = auto_cols * auto_rows
+            st.metric("Positive 비율", f"{pos_count}/{total} ({(pos_count/total*100):.1f}%)" if total > 0 else "0")
