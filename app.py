@@ -53,4 +53,91 @@ def draw_ruler_and_guide(img):
     for y in range(0, h, 200):
         cv2.line(r_img, (0, y), (int(40*scale), y), (255, 255, 255), int(3*scale))
         cv2.putText(r_img, str(y), (int(10*scale), y), font, scale, (255, 255, 255), int(2*scale))
-    return r
+    return r_img
+
+def get_auto_count(roi_gray, sens):
+    _, th_img = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    x_p = np.mean(th_img, axis=0)
+    y_p = np.mean(th_img, axis=1)
+    def count_p(proj):
+        limit = np.mean(proj) * sens
+        cnt, peak = 0, False
+        for v in proj:
+            if v > limit and not peak:
+                cnt += 1; peak = True
+            elif v < limit: peak = False
+        return cnt
+    return max(1, count_p(x_p)), max(1, count_p(y_p))
+
+# --- 메인 로직 ---
+uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
+
+if uploaded_file:
+    f_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img_bgr = cv2.imdecode(f_bytes, cv2.IMREAD_COLOR)
+    
+    if img_bgr is not None:
+        h, w = img_bgr.shape[:2]
+        M = cv2.getRotationMatrix2D((w//2, h//2), rotation, 1.0)
+        img_rot = cv2.warpAffine(img_bgr, M, (w, h))
+        img_rgb = cv2.cvtColor(img_rot, cv2.COLOR_BGR2RGB)
+        
+        tab1, tab2 = st.tabs(["📝 좌표/수평 확인 (Red Guide)", "📊 분석 결과"])
+        
+        with tab1:
+            ruler_view = draw_ruler_and_guide(img_rgb)
+            st.image(ruler_view, use_container_width=True, caption="Red Line을 기준으로 수평을 맞추고 좌표를 읽으세요.")
+            
+        with tab2:
+            pts = np.array([[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]], dtype=np.float32)
+            
+            # 격자 개수 결정
+            if auto_mode:
+                M_p = cv2.getPerspectiveTransform(pts, np.array([[0,0],[1000,0],[1000,1000],[0,1000]], dtype=np.float32))
+                warped = cv2.cvtColor(cv2.warpPerspective(img_rot, M_p, (1000, 1000)), cv2.COLOR_BGR2GRAY)
+                f_cols, f_rows = get_auto_count(warped, sensitivity)
+            else:
+                f_cols, f_rows = manual_cols, manual_rows
+            
+            # 분석 및 시각화
+            res_img = img_rgb.copy()
+            pos_cnt = 0
+            for r in range(f_rows):
+                v_r = r/(f_rows-1) if f_rows > 1 else 0
+                lp, rp = (1-v_r)*pts[0] + v_r*pts[3], (1-v_r)*pts[1] + v_r*pts[2]
+                for c in range(f_cols):
+                    h_r = c/(f_cols-1) if f_cols > 1 else 0
+                    cp = (1-h_r)*lp + h_r*rp
+                    cx, cy = int(cp[0]), int(cp[1])
+                    if 0 <= cx < w and 0 <= cy < h:
+                        is_pos = img_rgb[cy, cx, 1] > threshold
+                        if is_pos: pos_cnt += 1
+                        # 테두리 두께를 1로 얇게 변경
+                        cv2.circle(res_img, (cx, cy), radius, (0,255,0) if is_pos else (255,0,0), 1)
+            
+            cv2.polylines(res_img, [pts.astype(int)], True, (255, 255, 0), 2)
+            st.image(res_img, use_container_width=True)
+            
+            # 판정 결과 및 개수 정보 표시
+            total = f_cols * f_rows
+            ratio = (pos_cnt / total * 100) if total > 0 else 0
+            is_gmo = ratio >= gmo_thresh
+            
+            st.markdown("---")
+            # 가로/세로 인식 개수 요약
+            st.info(f"📊 **Grid 정보:** 가로(Column) **{f_cols}개** × 세로(Row) **{f_rows}개** (총 {total} Well)")
+
+            if is_gmo:
+                st.success(f"### 🧬 판정 결과: GMO Positive (신호율: {ratio:.1f}%)")
+            else:
+                st.error(f"### 🧬 판정 결과: Non-GMO (신호율: {ratio:.1f}%)")
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Well", f"{total}개")
+            c2.metric("Column (가로)", f"{f_cols}")
+            c3.metric("Row (세로)", f"{f_rows}")
+            c4.metric("Positive Well", f"{pos_cnt}개")
+    else:
+        st.error("이미지를 해석할 수 없습니다.")
+else:
+    st.info("💡 사진을 업로드하면 분석이 시작됩니다.")
