@@ -45,3 +45,4 @@ gmo_label_off = st.sidebar.text_input("Negative 라벨명", "Non-GMO")
             현재 형광 발현율은 **{pos_ratio:.1f}%**이며, 이는 설정하신 GMO 기준인 **{gmo_threshold_ratio}%**를 
             {'초과하므로' if is_gmo else '하회하므로'} 최종적으로 **{gmo_label_on if is_gmo else gmo_label_off}** 샘플로 분류됩니다.
             """)
+
