@@ -2,32 +2,52 @@ import streamlit as st
 import cv2
 import numpy as np
 
-st.set_page_config(page_title="Microwell Precision Analyzer", layout="wide")
-st.title("🔬 정밀 회전 및 4점 보정 분석기")
+st.set_page_config(page_title="Microwell Auto-Grid Analyzer", layout="wide")
+st.title("🔬 스마트 자동 격자 Microwell 분석기")
 
 # 1. 사이드바: 설정
-st.sidebar.header("🔄 1단계: 사진 회전")
-rotation = st.sidebar.slider("사진 기울기 조절", -180.0, 180.0, 0.0, step=0.1)
+st.sidebar.header("🔄 1단계: 사진 수평 보정")
+rotation = st.sidebar.slider("사진 기울기 조절", -10.0, 10.0, 0.0, step=0.1)
 
-st.sidebar.header("📍 2단계: 모서리 좌표 (Pixel)")
-col_count = st.sidebar.number_input("가로 우물 개수", 1, 100, 23)
-row_count = st.sidebar.number_input("세로 우물 개수", 1, 100, 24)
+st.sidebar.header("📍 2단계: 분석 영역(4점) 설정")
+# 업로드된 이미지 크기에 맞춰 조절할 수 있도록 범위를 넉넉히 설정
+tl_x = st.sidebar.number_input("좌상 X", 0, 5000, 100)
+tl_y = st.sidebar.number_input("좌상 Y", 0, 5000, 100)
+tr_x = st.sidebar.number_input("우상 X", 0, 5000, 1000)
+tr_y = st.sidebar.number_input("우상 Y", 0, 5000, 100)
+bl_x = st.sidebar.number_input("좌하 X", 0, 5000, 100)
+bl_y = st.sidebar.number_input("좌하 Y", 0, 5000, 800)
+br_x = st.sidebar.number_input("우하 X", 0, 5000, 1000)
+br_y = st.sidebar.number_input("우하 Y", 0, 5000, 800)
 
-# 초기 좌표값 (이미지 업로드 전 가이드용)
-tl_x = st.sidebar.number_input("좌측 상단 X", 0, 5000, 50)
-tl_y = st.sidebar.number_input("좌측 상단 Y", 0, 5000, 50)
-tr_x = st.sidebar.number_input("우측 상단 X", 0, 5000, 600)
-tr_y = st.sidebar.number_input("우측 상단 Y", 0, 5000, 50)
-bl_x = st.sidebar.number_input("좌측 하단 X", 0, 5000, 50)
-bl_y = st.sidebar.number_input("좌측 하단 Y", 0, 5000, 600)
-br_x = st.sidebar.number_input("우측 하단 X", 0, 5000, 600)
-br_y = st.sidebar.number_input("우측 하단 Y", 0, 5000, 600)
-
-st.sidebar.header("🧪 3단계: 판정 설정")
-radius = st.sidebar.slider("우물 반지름", 1, 30, 5)
+st.sidebar.header("🧪 3단계: 판정 및 감도")
+radius = st.sidebar.slider("우물 표시 크기", 1, 20, 5)
 threshold = st.sidebar.slider("형광 임계값 (G)", 0, 255, 60)
+sensitivity = st.sidebar.slider("인식 민감도 (Peak)", 0.1, 1.0, 0.5)
 
-# 2. 사진 업로드 및 처리
+# 2. 이미지 처리 함수
+def get_auto_count(roi_gray, sensitivity):
+    """이미지 투영을 통해 행/열 개수를 자동 계산"""
+    # X축(가로) 및 Y축(세로) 평균 밝기 계산
+    x_proj = np.mean(roi_gray, axis=0)
+    y_proj = np.mean(roi_gray, axis=1)
+    
+    # 간단한 피크 카운팅 로직 (평균값 이상을 피크로 간주)
+    def count_peaks(proj):
+        avg = np.mean(proj)
+        peaks = 0
+        is_peak = False
+        threshold_val = avg + (np.max(proj) - avg) * (1 - sensitivity)
+        for val in proj:
+            if val > threshold_val and not is_peak:
+                peaks += 1
+                is_peak = True
+            elif val < threshold_val:
+                is_peak = False
+        return max(1, peaks)
+
+    return count_peaks(x_proj), count_peaks(y_proj)
+
 uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
@@ -35,57 +55,54 @@ if uploaded_file:
     raw_img = cv2.imdecode(file_bytes, 1)
     
     if raw_img is not None:
-        # [회전 보정 실행]
+        # [회전 보정]
         h, w = raw_img.shape[:2]
-        center = (w // 2, h // 2)
-        rot_matrix = cv2.getRotationMatrix2D(center, rotation, 1.0)
-        # 회전 시 잘림 방지를 위해 결과 이미지 크기 유지
+        rot_matrix = cv2.getRotationMatrix2D((w // 2, h // 2), rotation, 1.0)
         img = cv2.warpAffine(raw_img, rot_matrix, (w, h))
-        
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # [영역 잘라내기 및 개수 자동 파악]
+        pts_src = np.array([[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]], dtype=np.float32)
+        
+        # 원근 변환(Perspective Transform)을 통해 영역을 평면으로 펴서 개수 분석
+        target_w, target_h = 800, 800 # 분석용 임시 해상도
+        pts_dst = np.array([[0,0], [target_w, 0], [target_w, target_h], [0, target_h]], dtype=np.float32)
+        M = cv2.getPerspectiveTransform(pts_src, pts_dst)
+        warped = cv2.warpPerspective(img, M, (target_w, target_h))
+        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        
+        # 행/열 개수 자동 감지
+        auto_cols, auto_rows = get_auto_count(warped_gray, sensitivity)
+        
+        st.info(f"🔎 시스템이 감지한 격자 크기: 가로 {auto_cols}개 x 세로 {auto_rows}개")
+
+        # [격자 그리기 및 분석]
         display_img = img_rgb.copy()
-
-        # 모서리 좌표 정의
-        pts_src = np.array([[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]], dtype=float)
-
         pos_count = 0
-        neg_count = 0
-        total_wells = col_count * row_count
+        total_wells = auto_cols * auto_rows
 
-        # 바리센트릭 보간 격자 생성
-        for r in range(row_count):
-            v_ratio = r / (row_count - 1) if row_count > 1 else 0
-            left_edge = (1 - v_ratio) * pts_src[0] + v_ratio * pts_src[3]
-            right_edge = (1 - v_ratio) * pts_src[1] + v_ratio * pts_src[2]
+        for r in range(auto_rows):
+            v_ratio = r / (auto_rows - 1) if auto_rows > 1 else 0
+            left = (1 - v_ratio) * pts_src[0] + v_ratio * pts_src[3]
+            right = (1 - v_ratio) * pts_src[1] + v_ratio * pts_src[2]
             
-            for c in range(col_count):
-                h_ratio = c / (col_count - 1) if col_count > 1 else 0
-                center_pt = (1 - h_ratio) * left_edge + h_ratio * right_edge
-                cx, cy = int(center_pt[0]), int(center_pt[1])
+            for c in range(auto_cols):
+                h_ratio = c / (auto_cols - 1) if auto_cols > 1 else 0
+                center = (1 - h_ratio) * left + h_ratio * right
+                cx, cy = int(center[0]), int(center[1])
 
                 if 0 <= cx < w and 0 <= cy < h:
-                    # 중심 픽셀 주변의 평균 G값 계산 (단일 픽셀보다 정확함)
-                    sample = img_rgb[max(0, cy-1):cy+2, max(0, cx-1):cx+2, 1]
-                    g_val = np.mean(sample)
-                    
-                    if g_val > threshold:
-                        pos_count += 1
-                        color = (0, 255, 255) # Positive: Cyan (눈에 잘 띄게)
-                    else:
-                        neg_count += 1
-                        color = (255, 0, 0) # Negative: Red
-                    
+                    g_val = img_rgb[cy, cx, 1]
+                    color = (0, 255, 0) if g_val > threshold else (255, 0, 0)
+                    if g_val > threshold: pos_count += 1
                     cv2.circle(display_img, (cx, cy), radius, color, 1)
 
-        # 영역 가이드 라인 (노란색 사각형)
+        # 가이드 라인 및 결과 출력
         cv2.polylines(display_img, [pts_src.astype(int)], True, (255, 255, 0), 2)
-
-        st.image(display_img, caption=f"회전 {rotation}° 및 4점 보정 적용 결과", use_container_width=True)
+        st.image(display_img, use_container_width=True)
         
-        # 결과 대시보드
-        st.subheader("📊 데이터 분석 요약")
-        cols = st.columns(4)
-        cols[0].metric("총 우물", f"{total_wells}개")
-        cols[1].metric("Positive", f"{pos_count}개")
-        cols[2].metric("Negative", f"{neg_count}개")
-        cols[3].metric("형광 발현율", f"{(pos_count/total_wells*100):.1f}%")
+        # 분석 요약
+        c1, c2, c3 = st.columns(3)
+        c1.metric("감지된 우물 수", f"{total_wells}개")
+        c2.metric("Positive", f"{pos_count}개")
+        c3.metric("비율", f"{(pos_count/total_wells*100):.1f}%" if total_wells > 0 else "0%")
