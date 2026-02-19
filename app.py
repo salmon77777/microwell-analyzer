@@ -1,18 +1,18 @@
 import streamlit as st
 import cv2
 import numpy as np
-from scipy.ndimage import maximum_filter
 
-st.set_page_config(page_title="최종 병기 분석기", layout="wide")
-st.title("🔬 초강력 픽셀 피크 분석기")
+# 1. 페이지 설정
+st.set_page_config(page_title="최종 안정화 분석기", layout="wide")
+st.title("🔬 픽셀 피크 기반 자동 분석기 (안정 버전)")
 
-# --- 사이드바: 파라미터 극단적 단순화 ---
+# --- 사이드바 설정 ---
 st.sidebar.header("⚙️ 인식 강도 조절")
-st.sidebar.info("자동 인식이 안 될 때 사용하는 최후의 수단입니다.")
-
-# 피크 탐색 민감도 (낮을수록 아주 미세한 점도 다 잡음)
+# 최소 밝기: 이 값보다 밝은 점들 중에서 피크를 찾습니다.
 peak_min_val = st.sidebar.slider("최소 밝기 문턱값", 0, 255, 30)
-min_dist = st.sidebar.slider("Well 간 최소 거리", 1, 100, 15)
+# 최소 거리: 점들 사이의 간격입니다. (너무 작으면 한 Well에 여러 점이 찍힘)
+min_dist = st.sidebar.slider("Well 간 최소 거리", 1, 100, 20)
+# 시각화용 반지름
 well_r = st.sidebar.slider("표시될 Well 반지름", 1, 50, 12)
 
 st.sidebar.header("🧪 판정 설정")
@@ -28,37 +28,49 @@ if uploaded_file:
     if img_bgr is not None:
         h, w = img_bgr.shape[:2]
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        # Green 채널이 가장 정보가 많으므로 이를 분석용으로 사용
-        gray = img_bgr[:,:,1] 
         
-        # 1. Local Maximum Filter (주변에서 가장 밝은 점 찾기)
-        # 이 필터는 수학적 원을 무시하고 그냥 '밝은 지점'의 중심을 찾습니다.
-        data_max = maximum_filter(gray, size=min_dist)
-        maxima = (gray == data_max)
+        # Green 채널 추출 (형광 분석의 핵심)
+        green_ch = img_bgr[:,:,1] 
         
-        # 2. 배경 노이즈 제거 (문턱값 이하 제외)
-        maxima[gray < peak_min_val] = False
+        # [핵심] Scipy 없이 피크 탐색 (OpenCV의 Dilate 사용)
+        # 주변에서 가장 밝은 값을 확장한 뒤 원본과 비교하여 '꼭짓점' 추출
+        kernel_size = max(3, min_dist if min_dist % 2 != 0 else min_dist + 1)
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        local_max = cv2.dilate(green_ch, kernel, iterations=1)
+        peak_mask = (green_ch == local_max) & (green_ch > peak_min_val)
         
-        # 3. 좌표 추출
-        y_coords, x_coords = np.where(maxima)
+        # 피크 좌표 추출
+        y_coords, x_coords = np.where(peak_mask)
         
         res_img = img_rgb.copy()
-        pos_cnt = 0
         valid_wells = []
-
+        pos_cnt = 0
+        
+        # 중복 제거 및 시각화
+        # dilate로도 중복이 생길 수 있으므로 거리를 한 번 더 체크
+        centers = []
         for cx, cy in zip(x_coords, y_coords):
-            # 가장자리 제외
+            # 가장자리 제외 (5px 마진)
             if cx < 5 or cx > w-5 or cy < 5 or cy > h-5:
                 continue
-                
+            
+            # 너무 붙어있는 점들 필터링
+            too_close = False
+            for ox, oy in centers:
+                if np.sqrt((cx-ox)**2 + (cy-oy)**2) < min_dist:
+                    too_close = True
+                    break
+            if too_close: continue
+            
+            centers.append((cx, cy))
             valid_wells.append((cx, cy))
             
-            # 형광 판정 (해당 피크 지점의 밝기)
-            is_pos = gray[cy, cx] > threshold_g
+            # 형광 판정 및 그리기
+            is_pos = green_ch[cy, cx] > threshold_g
             if is_pos:
                 pos_cnt += 1
             
-            # 노란색 원: 탐지된 Well / 초록색 점: Positive
+            # 노란색 원: 모든 Well / 초록색 점: Positive
             cv2.circle(res_img, (cx, cy), well_r, (255, 255, 0), 1)
             if is_pos:
                 cv2.circle(res_img, (cx, cy), max(1, int(well_r*0.5)), (0, 255, 0), -1)
@@ -74,7 +86,10 @@ if uploaded_file:
         c2.metric("Positive Well", f"{pos_cnt}개")
         c3.metric("신호율", f"{ratio:.1f}%")
         
-        with st.expander("인식 보조 화면"):
-            st.image(gray, caption="분석에 사용된 Green 채널 원본")
+        if ratio >= 50: # 예시 기준값
+            st.success("🧬 판정: GMO Positive")
+        else:
+            st.error("🧬 판정: Non-GMO")
+            
     else:
         st.error("이미지를 읽을 수 없습니다.")
