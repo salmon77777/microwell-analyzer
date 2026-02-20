@@ -6,8 +6,9 @@ import math
 
 # --- 새로운 핵심 함수: Blob Detection 기반 분석 ---
 def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria):
-    # 1. 이미지 변환 (RGB -> Grayscale)
-    image_rgb = np.array(image_pil.convert('RGB'))
+    # 1. 이미지를 무조건 3채널 RGB로 변환 (투명도 채널 문제 방지)
+    image_rgb_pil = image_pil.convert('RGB')
+    image_rgb = np.array(image_rgb_pil)
     gray_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
     img_h, img_w = gray_img.shape[:2]
 
@@ -46,6 +47,7 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     for kp in keypoints:
         x, y = int(kp.pt[0]), int(kp.pt[1])
         r = int(kp.size / 2)
+        # 이미지 테두리에 걸치지 않는 스팟만 선택
         if margin < x < (img_w - margin) and margin < y < (img_h - margin):
             positive_wells.append((x, y, r))
 
@@ -57,7 +59,7 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     ratio = 0.0
 
     if num_positive > 5: # 최소한의 샘플이 확보되었을 때 추정 수행
-        # 검출된 스팟들의 평균 면적 및 반지름 계산
+        # 검출된 스팟들의 평균 반지름 계산
         avg_radius = np.mean([w[2] for w in positive_wells])
         avg_spot_area = np.pi * (avg_radius ** 2)
         
@@ -71,16 +73,17 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         bbox_area = (max_x - min_x + avg_radius*2) * (max_y - min_y + avg_radius*2)
         
         # 전체 Well 개수 추정 (전체 면적 / (스팟 면적 + 간격 고려))
-        # * 간격 보정 계수(1.5 ~ 2.0)를 사용하여 스팟 사이의 빈 공간을 반영
-        fill_factor = 1.8 # 경험적 보정 계수 (조절 가능)
-        estimated_total = bbox_area / (avg_spot_area * fill_factor)
+        # * 간격 보정 계수(fill_factor)를 사용하여 스팟 사이의 빈 공간을 반영
+        fill_factor = 1.8 # 경험적 보정 계수
+        if avg_spot_area > 0:
+            estimated_total = bbox_area / (avg_spot_area * fill_factor)
+            total_wells = int(round(estimated_total))
         
-        total_wells = int(round(estimated_total))
         # 추정된 전체 개수가 실제 Positive 개수보다 적을 경우 보정
         total_wells = max(total_wells, num_positive)
         
         num_negative = total_wells - num_positive
-        ratio = (num_positive / total_wells * 100)
+        ratio = (num_positive / total_wells * 100) if total_wells > 0 else 0
 
     is_gmo = ratio >= gmo_criteria
 
@@ -105,7 +108,7 @@ with col1:
     st.info("새로운 알고리즘이 적용되었습니다. 아래 설정들을 조절하여 최적의 검출 결과를 찾아보세요.")
     
     with st.expander("1️⃣ 밝기 및 GMO 기준 설정", expanded=True):
-        min_threshold = st.slider("최소 밝기 임계값 (Min Threshold)", 0, 255, 50, help="이 값보다 어두운 영역은 무시합니다. 낮을수록 어두운 스팟도 검출합니다.")
+        min_threshold = st.slider("최소 밝기 임계값 (Min Threshold)", 0, 255, 30, help="이 값보다 어두운 영역은 무시합니다. 낮을수록 어두운 스팟도 검출합니다.")
         max_threshold = st.slider("최대 밝기 임계값 (Max Threshold)", 0, 255, 255, help="이 값보다 밝은 영역은 무시합니다. 보통 최대로 설정합니다.")
         gmo_criteria = st.slider("GMO 판정 기준 (%)", 1, 100, 50, help="Positive 비율이 이 수치 이상이면 GMO로 판정합니다.")
 
@@ -113,8 +116,8 @@ with col1:
         st.write("검출하려는 스팟의 크기와 모양을 정의합니다.")
         min_area = st.number_input("최소 면적 (픽셀)", min_value=10, max_value=5000, value=100, step=50, help="이보다 작은 노이즈는 제거합니다.")
         max_area = st.number_input("최대 면적 (픽셀)", min_value=100, max_value=50000, value=5000, step=100, help="이보다 큰 뭉친 영역은 제외합니다.")
-        circularity = st.slider("최소 원형도 (Circularity)", 0.1, 1.0, 0.5, step=0.1, help="1.0에 가까울수록 완벽한 원만 검출합니다. 찌그러진 모양을 검출하려면 낮추세요.")
-        convexity = st.slider("최소 볼록성 (Convexity)", 0.1, 1.0, 0.7, step=0.1, help="1.0에 가까울수록 매끈한 형태만 검출합니다. 울퉁불퉁하면 낮추세요.")
+        circularity = st.slider("최소 원형도 (Circularity)", 0.1, 1.0, 0.3, step=0.1, help="1.0에 가까울수록 완벽한 원만 검출합니다. 찌그러진 모양을 검출하려면 낮추세요.")
+        convexity = st.slider("최소 볼록성 (Convexity)", 0.1, 1.0, 0.5, step=0.1, help="1.0에 가까울수록 매끈한 형태만 검출합니다. 울퉁불퉁하면 낮추세요.")
 
     uploaded_file = st.file_uploader("✨ 분석할 형광 이미지를 업로드하세요", type=['png', 'jpg', 'jpeg'])
 
