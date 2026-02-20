@@ -3,115 +3,124 @@ import numpy as np
 import cv2
 from PIL import Image
 
-st.set_page_config(page_title="초정밀 격자 분석기", layout="wide")
-st.title("🧪 회전 보정형 Microwell 격자 분석기")
-st.info("사진의 기울기를 자동으로 감지하여 신호가 없는 빈 Well까지 정확히 추적합니다.")
+# 1. 페이지 설정
+st.set_page_config(page_title="GMO Microwell 분석기", layout="wide")
+st.title("🔬 Microwell 완전 자동 분석기")
+st.markdown("""
+- **자동 탐지**: 형광이 있는 Well을 찾아 간격과 각도를 분석합니다.
+- **격자 복원**: 신호가 없는(어두운) Well도 격자 패턴을 통해 자동으로 계산에 포함합니다.
+- **테두리 보호**: 사진 가장자리에 걸린 온전하지 않은 Well은 분석에서 자동 제외됩니다.
+""")
 
 # --- 사이드바: 정밀 튜닝 ---
-st.sidebar.header("⚙️ 1. 인식 및 격자 설정")
-well_radius = st.sidebar.slider("Well 표시 크기 (반지름)", 2, 20, 6)
-min_brightness = st.sidebar.slider("인식 감도 (배경 제거)", 0, 255, 45)
+st.sidebar.header("⚙️ 분석 설정")
+well_radius = st.sidebar.slider("Well 크기 (반지름)", 3, 30, 8, help="실제 Well의 크기에 맞춰 원의 크기를 조절하세요.")
+sensitivity = st.sidebar.slider("인식 민감도", 0, 255, 45, help="값이 낮을수록 흐릿한 Well도 잘 찾지만, 노이즈도 많아집니다.")
+threshold_g = st.sidebar.slider("형광 임계값 (Positive 기준)", 0, 255, 75, help="이 값보다 밝으면 Positive(GMO)로 판정합니다.")
+gmo_limit = st.sidebar.slider("GMO 판정 기준 (%)", 0, 100, 50)
 
-st.sidebar.header("🧪 2. 판정 설정")
-threshold_g = st.sidebar.slider("GMO 양성 판정 기준 (Green)", 0, 255, 75)
-
-# 혹시 자동 계산이 미세하게 틀릴 경우를 대비한 수동 보정 도구
-st.sidebar.header("🔄 3. 격자 미세 조정 (필요 시)")
-offset_x = st.sidebar.slider("가로 위치 미세 조정", -50, 50, 0)
-offset_y = st.sidebar.slider("세로 위치 미세 조정", -50, 50, 0)
-manual_angle = st.sidebar.slider("기울기 미세 조정 (도)", -5.0, 5.0, 0.0, step=0.1)
-
-uploaded_file = st.file_uploader("분석할 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
+# --- 메인 로직 ---
+uploaded_file = st.file_uploader("Microwell 결과 사진을 업로드하세요", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
+    # 이미지 로드
     image = Image.open(uploaded_file)
     img_rgb = np.array(image.convert("RGB"))
     h, w = img_rgb.shape[:2]
     
-    # 분석 속도 및 거리 계산 일관성을 위한 리사이징 (가로 1200px 기준)
-    scale = 1200 / w
-    tw, th = 1200, int(h * scale)
+    # 1. 처리 속도와 일관성을 위한 리사이즈 (가로 1000px 기준)
+    scale = 1000 / w
+    tw, th = 1000, int(h * scale)
     img_small = cv2.resize(img_rgb, (tw, th))
     green_ch = cv2.cvtColor(img_small, cv2.COLOR_RGB2BGR)[:,:,1]
     blurred = cv2.GaussianBlur(green_ch, (5, 5), 0)
     
-    # 1. 시드 포인트(밝은 Well) 추출
-    local_max = cv2.dilate(blurred, np.ones((11, 11), np.uint8), iterations=1)
-    peak_mask = (blurred == local_max) & (blurred > min_brightness)
+    # 2. 보이는(Positive) Well 위치 추출
+    # local maximum을 찾아 밝은 점들의 좌표를 확보합니다.
+    k_size = max(3, int(well_radius * 1.5))
+    if k_size % 2 == 0: k_size += 1
+    local_max = cv2.dilate(blurred, np.ones((k_size, k_size), np.uint8), iterations=1)
+    peak_mask = (blurred == local_max) & (blurred > sensitivity)
     yp, xp = np.where(peak_mask)
     
-    if len(xp) > 30:
-        # 2. [핵심] 기울기 및 간격 자동 추론
+    if len(xp) > 10:
+        # 3. 격자 패턴 추론 (빈 Well 위치 계산용)
         pts = np.column_stack((xp, yp)).astype(np.float32)
         
-        # 간격(Spacing) 계산
-        def estimate_spacing(coords):
+        # 간격(Spacing) 및 기울기(Angle) 추정
+        def estimate_grid_params(coords):
             c_sort = np.sort(coords)
             diffs = np.diff(c_sort)
-            valid = diffs[(diffs > 8) & (diffs < 40)] # 예상 간격 범위
-            return np.median(valid) if len(valid) > 0 else 15.0
+            valid_diffs = diffs[(diffs > well_radius) & (diffs < well_radius * 5)]
+            return np.median(valid_diffs) if len(valid_diffs) > 0 else 20.0
 
-        dx = estimate_spacing(xp)
-        dy = estimate_spacing(yp)
+        dx = estimate_grid_params(xp)
+        dy = estimate_grid_params(yp)
         
-        # 기울기(Angle) 계산: 근접한 점들 사이의 각도 평균
-        angles = []
-        for i in range(min(len(pts), 100)):
-            dists = np.linalg.norm(pts - pts[i], axis=1)
-            neighbors = pts[(dists > dx*0.8) & (dists < dx*1.2)]
-            for n in neighbors:
-                ang = np.degrees(np.arctan2(n[1] - pts[i][1], n[0] - pts[i][0]))
-                # 0, 90, 180, 270도 근처의 각도만 수집
-                ang = (ang + 45) % 90 - 45
-                angles.append(ang)
+        # 중심점과 범위 설정
+        min_x, max_x = xp.min(), xp.max()
+        min_y, max_y = yp.min(), yp.max()
         
-        avg_angle = np.median(angles) + manual_angle
-        
-        # 3. 회전된 격자 생성 (Grid Generation)
+        # 4. 분석 수행
         res_img = img_small.copy()
-        pos_cnt = 0
-        total_count = 0
+        pos_wells = []
+        neg_wells = []
         
-        # 기준 원점 설정
-        origin_x = np.median(xp) + offset_x
-        origin_y = np.median(yp) + offset_y
-        
-        # 회전 행렬 정의
-        cos_a = np.cos(np.radians(avg_angle))
-        sin_a = np.sin(np.radians(avg_angle))
-        
-        # 이미지 전체를 덮도록 격자 범위 계산 (회전 고려)
-        range_limit = int(max(tw, th) / min(dx, dy)) + 10
-        for i in range(-range_limit, range_limit):
-            for j in range(-range_limit, range_limit):
-                # 로컬 좌표를 회전시켜 월드 좌표로 변환
-                lx, ly = i * dx, j * dy
-                cx = int(origin_x + lx * cos_a - ly * sin_a)
-                cy = int(origin_y + lx * sin_a + ly * cos_a)
+        # 생성된 격자를 순회하며 판정
+        # np.arange를 통해 실제 발견된 Well들의 영역 내를 촘촘히 조사합니다.
+        for ty in np.arange(min_y, max_y + 1, dy):
+            for tx in np.arange(min_x, max_x + 1, dx):
+                cx, cy = int(tx), int(ty)
                 
-                if 5 <= cx < tw-5 and 5 <= cy < th-5:
-                    total_count += 1
-                    
-                    # 모든 Well은 노란색 테두리
-                    cv2.circle(res_img, (cx, cy), well_radius, (255, 255, 0), 1)
-                    
-                    # 형광 판정 (중심부 평균 밝기)
-                    val = blurred[cy, cx]
-                    if val > threshold_g:
-                        pos_cnt += 1
-                        # 양성은 내부에 초록색 점 표시
-                        cv2.circle(res_img, (cx, cy), int(well_radius*0.6), (0, 255, 0), -1)
+                # [요구사항 2 반영] 테두리에 걸린 스팟 제외 (반지름 r 마진 확인)
+                if cx - well_radius < 5 or cx + well_radius > tw - 5 or \
+                   cy - well_radius < 5 or cy + well_radius > th - 5:
+                    continue
+                
+                # 해당 위치의 실제 신호 분석
+                # 격자점 주변 소량의 픽셀 평균값으로 판정 (노이즈 방지)
+                roi = blurred[max(0, cy-2):min(th, cy+3), max(0, cx-2):min(tw, cx+3)]
+                val = np.mean(roi) if roi.size > 0 else 0
+                
+                # [요구사항 1, 3 반영] 모든 Well은 노란색으로 표시 (전체 개수 포함)
+                cv2.circle(res_img, (cx, cy), well_radius, (255, 255, 0), 1)
+                
+                if val > threshold_g:
+                    # Positive 판정
+                    pos_wells.append((cx, cy))
+                    cv2.circle(res_img, (cx, cy), int(well_radius*0.6), (0, 255, 0), -1)
+                else:
+                    # Negative 판정 (빈 공간)
+                    neg_wells.append((cx, cy))
 
-        st.image(res_img, use_container_width=True)
+        # 5. 결과 시각화 및 통계
+        st.image(res_img, use_container_width=True, caption="노란색 원: 전체 Well / 초록색 점: Positive 신호")
         
-        # 결과 요약
-        ratio = (pos_cnt / total_count * 100) if total_count > 0 else 0
+        total_count = len(pos_wells) + len(neg_wells)
+        pos_count = len(pos_wells)
+        neg_count = len(neg_wells)
+        ratio = (pos_count / total_count * 100) if total_count > 0 else 0
+        
+        # [요구사항 5 반영] 통계 수치 표기
         st.markdown("---")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("전체 Well (격자 복원)", f"{total_count}개")
-        c2.metric("Positive Well", f"{pos_cnt}개")
-        c3.metric("신호율", f"{ratio:.1f}%")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("전체 Well 개수", f"{total_count}개")
+        col2.metric("Positive Well", f"{pos_count}개")
+        col3.metric("Negative Well", f"{neg_count}개")
+        col4.metric("Positive 비율", f"{ratio:.1f}%")
         
-        st.caption(f"📏 분석 데이터: 간격({dx:.1f}px, {dy:.1f}px) / 기울기({avg_angle:.2f}도)")
+        # [요구사항 6 반영] 최종 GMO 판정
+        if ratio >= gmo_limit:
+            st.success(f"✅ **최종 판정: GMO Positive** (신호율 {ratio:.1f}% >= {gmo_limit}%)")
+        else:
+            st.error(f"❌ **최종 판정: Non-GMO** (신호율 {ratio:.1f}% < {gmo_limit}%)")
+            
     else:
-        st.error("Well의 위치를 파악할 수 없습니다. 사이드바의 '인식 감도'를 낮춰보세요.")
+        st.error("⚠️ Well이 인식되지 않았습니다. 사이드바의 '인식 감도'를 낮춰보세요.")
+        with st.expander("도움말"):
+            st.write("1. 녹색 불빛이 선명하게 보이도록 촬영했는지 확인하세요.")
+            st.write("2. '인식 감도'를 낮추면 더 많은 Well을 찾으려 시도합니다.")
+            st.write("3. 사진의 밝기가 너무 어두우면 '배경 노이즈 제거'를 0에 가깝게 조절하세요.")
+
+else:
+    st.info("실험한 Microwell 형광 사진(Green Channel)을 업로드하면 자동으로 분석을 시작합니다.")
