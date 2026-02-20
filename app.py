@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import math
-from scipy.spatial import cKDTree # 고속 연산을 위한 라이브러리 추가
+from scipy.spatial import cKDTree
 
 def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria):
     image_rgb_pil = image_pil.convert('RGB')
@@ -11,7 +11,7 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     gray_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
     img_h, img_w = gray_img.shape[:2]
 
-    # 1. 윤곽선 기반 실제 스팟(Positive) 찾기 (매우 빠름)
+    # 1. 윤곽선 기반 실제 스팟(Positive) 찾기
     blurred = cv2.GaussianBlur(gray_img, (3, 3), 0)
     _, thresh = cv2.threshold(blurred, min_threshold, max_threshold, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -51,16 +51,16 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     rows = 0
 
     if len(raw_positive_wells) > 10:
-        # 2. KD-Tree를 이용한 초고속 간격(Pitch) 및 각도 계산
         pts = np.array([w[:2] for w in raw_positive_wells])
         radii = [w[2] for w in raw_positive_wells]
         avg_radius = int(round(np.mean(radii)))
 
+        # 2. KD-Tree를 이용한 초고속 간격(Pitch) 파악
         tree = cKDTree(pts)
-        distances, _ = tree.query(pts, k=2) # 가장 가까운 이웃 1개 탐색
+        distances, _ = tree.query(pts, k=2)
         rough_pitch = np.median(distances[:, 1])
 
-        # 각도 계산 (가까운 이웃들끼리만 연산하여 속도 극대화)
+        # 각도 계산
         pairs = tree.query_pairs(r=rough_pitch * 1.5)
         angles = []
         for i, j in pairs:
@@ -74,7 +74,7 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
             angles.append(a_mod)
         grid_angle = np.median(angles) if angles else 0.0
 
-        # 3. 배열을 평평하게 회전 (축 정렬)
+        # 3. 배열 평탄화 회전
         rad = np.radians(-grid_angle)
         cos_a = np.cos(rad)
         sin_a = np.sin(rad)
@@ -82,12 +82,11 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         rot_pts[:, 0] = pts[:, 0] * cos_a - pts[:, 1] * sin_a
         rot_pts[:, 1] = pts[:, 0] * sin_a + pts[:, 1] * cos_a
 
-        # 4. 축 투영법(Axis Projection)으로 렌즈 왜곡 흡수하며 줄(Row/Col) 찾기
+        # 4. 축 투영법
         def build_axes(coords, pitch):
             sorted_c = np.sort(coords)
             clusters = []
             curr = [sorted_c[0]]
-            # 밀집된 점들을 하나의 줄(Line)로 클러스터링
             for c in sorted_c[1:]:
                 if c - np.mean(curr) < pitch * 0.5:
                     curr.append(c)
@@ -96,7 +95,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     curr = [c]
             clusters.append(np.mean(curr))
 
-            # 누락된 줄(Empty Line)이 있으면 수학적으로 보간하여 채워넣기
             gaps = np.diff(clusters)
             valid_gaps = [g for g in gaps if g < pitch * 1.5]
             local_pitch = np.median(valid_gaps) if valid_gaps else pitch
@@ -112,7 +110,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                 final_axis.append(clusters[i])
             return np.array(final_axis)
 
-        # X축(열), Y축(행) 각각의 1D 그리드 라인을 완벽하게 도출
         final_cols = build_axes(rot_pts[:, 0], rough_pitch)
         final_rows = build_axes(rot_pts[:, 1], rough_pitch)
 
@@ -120,14 +117,29 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         rows = len(final_rows)
         total_wells = cols * rows
 
-        # 5. 각 스팟을 그리드 좌표(col, row)에 초고속 매핑
+        # 5. ★ 추가됨: 엄격한 노이즈 필터링 및 정밀 매핑
         detected_grid = {}
         for idx, (rx, ry) in enumerate(rot_pts):
             c_idx = np.argmin(np.abs(final_cols - rx))
             r_idx = np.argmin(np.abs(final_rows - ry))
-            detected_grid[(c_idx, r_idx)] = pts[idx] # 원본 좌표 저장
+            
+            # 가상 격자의 정중앙 좌표
+            ideal_rx = final_cols[c_idx]
+            ideal_ry = final_rows[r_idx]
+            
+            # 정중앙으로부터 얼마나 벗어나 있는지 오차 계산
+            error_dist = math.hypot(rx - ideal_rx, ry - ideal_ry)
+            
+            # 허용 오차: 스팟 간격(pitch)의 40% 이내인 경우만 정상 스팟으로 인정 (그 이상은 웰 사이의 먼지/노이즈로 간주)
+            if error_dist < rough_pitch * 0.40:
+                # 이미 해당 자리에 다른 스팟이 매핑되었다면, 중앙에 더 가까운 진짜 스팟으로 덮어쓰기
+                if (c_idx, r_idx) not in detected_grid:
+                    detected_grid[(c_idx, r_idx)] = (pts[idx], error_dist)
+                else:
+                    if error_dist < detected_grid[(c_idx, r_idx)][1]:
+                        detected_grid[(c_idx, r_idx)] = (pts[idx], error_dist)
 
-        # 6. 원래 각도로 복원하며 시각화 및 결과 집계
+        # 6. 복원 및 렌더링
         inv_rad = np.radians(grid_angle)
         inv_cos = np.cos(inv_rad)
         inv_sin = np.sin(inv_rad)
@@ -135,15 +147,15 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         for c in range(cols):
             for r in range(rows):
                 if (c, r) in detected_grid:
-                    # Positive: 실제 찾은 형광 스팟 중앙에 표시
-                    px, py = detected_grid[(c, r)]
+                    # Positive: 검증된 실제 스팟
+                    px, py = detected_grid[(c, r)][0] # 좌표만 추출
                     px, py = int(round(px)), int(round(py))
                     
                     cv2.circle(grid_img, (px, py), avg_radius, (0, 255, 255), 1)
                     cv2.circle(result_img, (px, py), avg_radius, (255, 255, 0), 1)
                     matched_pos_count += 1
                 else:
-                    # Negative: 렌즈 왜곡이 반영된 위치를 추정하여 표시
+                    # Negative: 스팟이 없거나 먼지만 있었던 빈 자리
                     rx = final_cols[c]
                     ry = final_rows[r]
                     px = rx * inv_cos - ry * inv_sin
@@ -187,7 +199,7 @@ with col2:
     if uploaded_file is not None:
         image_pil = Image.open(uploaded_file)
         
-        with st.spinner("초고속 KD-Tree 알고리즘으로 대규모 스팟을 맵핑 중입니다... (약 0.1초 소요)"):
+        with st.spinner("노이즈를 필터링하며 맵핑 중입니다... (약 0.1초 소요)"):
             grid_img, result_img, total, pos, neg, ratio, is_gmo, cols, rows = analyze_microwells(
                 image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria
             )
@@ -196,13 +208,13 @@ with col2:
             
             with tab1:
                 st.subheader("가상 격자(Virtual Grid) 계산 확인")
-                st.write("초고속 축 투영법을 사용하여 대규모 배열에서도 병목 없이 즉시 격자를 생성합니다.")
+                st.write("웰 사이의 먼지나 노이즈를 식별하여 제거하고, 완벽한 바둑판 배열만 표시합니다.")
                 col_a, col_b = st.columns(2)
                 col_a.metric("추정된 배열 형태", f"가로 {cols} x 세로 {rows} 줄")
                 col_b.metric("계산된 전체 Well 개수", f"{total:,} 개")
                 
                 if total > 0:
-                    st.image(grid_img, caption="청록색: 초고속으로 추정된 정밀 가상 격자점", use_column_width=True)
+                    st.image(grid_img, caption="청록색: 노이즈가 제거된 정밀 가상 격자점", use_column_width=True)
                 else:
                     st.warning("스팟이 충분히 검출되지 않았습니다. 밝기나 면적 설정을 조절해주세요.")
                     
