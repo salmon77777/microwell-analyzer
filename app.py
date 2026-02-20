@@ -8,38 +8,45 @@ import math
 def calculate_distance(p1, p2):
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
-def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria):
+def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria):
     image_rgb_pil = image_pil.convert('RGB')
     image_rgb = np.array(image_rgb_pil)
     gray_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
     img_h, img_w = gray_img.shape[:2]
 
-    # 1. 스팟 검출 (밝은 스팟)
-    params = cv2.SimpleBlobDetector_Params()
-    params.filterByColor = True
-    params.blobColor = 255 
-    params.minThreshold = min_threshold
-    params.maxThreshold = max_threshold
-    params.thresholdStep = 5
-    params.filterByArea = True
-    params.minArea = min_area
-    params.maxArea = max_area
-    params.filterByCircularity = True
-    params.minCircularity = circularity
-    params.filterByConvexity = True
-    params.minConvexity = convexity
+    # 1. 윤곽선(Contour) 및 무게중심(Moments) 기반의 초정밀 스팟 검출
+    blurred = cv2.GaussianBlur(gray_img, (3, 3), 0)
+    _, thresh = cv2.threshold(blurred, min_threshold, max_threshold, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    detector = cv2.SimpleBlobDetector_create(params)
-    keypoints = detector.detect(gray_img)
-
-    # 2. 확실한 양성 스팟 필터링
     raw_positive_wells = []
     margin = 5
-    for kp in keypoints:
-        x, y = int(kp.pt[0]), int(kp.pt[1])
-        r = int(kp.size / 2)
-        if margin < x < (img_w - margin) and margin < y < (img_h - margin):
-            raw_positive_wells.append((x, y, r))
+    
+    # 각 스팟의 기하학적 특성 필터링 및 정확한 중앙점 계산
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if min_area <= area <= max_area:
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0: continue
+            circularity = 4 * np.pi * (area / (perimeter * perimeter))
+            
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            if hull_area == 0: continue
+            convexity = area / hull_area
+
+            # 사용자가 설정한 형태 기준을 통과한 경우에만
+            if circularity >= circularity_thresh and convexity >= convexity_thresh:
+                # Moments를 이용한 픽셀 단위의 완벽한 무게중심 계산
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cx = M["m10"] / M["m00"]
+                    cy = M["m01"] / M["m00"]
+                    _, radius = cv2.minEnclosingCircle(cnt)
+                    
+                    # 가장자리 제외
+                    if margin < cx < (img_w - margin) and margin < cy < (img_h - margin):
+                        raw_positive_wells.append((cx, cy, radius))
 
     num_raw_positive = len(raw_positive_wells)
     
@@ -51,10 +58,11 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     matched_neg_count = 0
     ratio = 0.0
     is_gmo = False
+    cols = 0
+    rows = 0
 
-    # 3. 새로운 로직: 좌표 투영 및 보간법을 통한 완벽한 격자 생성
+    # 2. 좌표 투영 및 보간법을 통한 가상 격자 생성
     if num_raw_positive > 10:
-        # 3-1. 스팟 간 평균 최소 거리(Pitch) 계산
         nearest_distances = []
         for p1 in raw_positive_wells:
             min_d = float('inf')
@@ -67,23 +75,21 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         pitch = np.median(nearest_distances)
 
         if pitch > 0:
-            # 3-2. 전체 이미지의 미세한 기울기(Angle) 파악
             angles = []
             for i, p1 in enumerate(raw_positive_wells):
                 for j, p2 in enumerate(raw_positive_wells):
                     if i == j: continue
                     d = calculate_distance(p1[:2], p2[:2])
-                    if d < pitch * 1.5: # 인접한 스팟 사이의 각도만 계산
+                    if d < pitch * 1.5: 
                         dy = p2[1] - p1[1]
                         dx = p2[0] - p1[0]
                         angle = np.degrees(np.arctan2(dy, dx))
                         angle = angle % 90
-                        if angle > 45: angle -= 90 # -45 ~ 45도 사이로 정규화
+                        if angle > 45: angle -= 90 
                         angles.append(angle)
             
             grid_angle = np.median(angles) if angles else 0.0
 
-            # 3-3. 스팟들을 똑바르게(회전) 펴기
             center = np.mean([w[:2] for w in raw_positive_wells], axis=0)
             M_rot = cv2.getRotationMatrix2D(tuple(center), grid_angle, 1.0)
             
@@ -95,13 +101,11 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
             xs = rotated_pts[:, 0]
             ys = rotated_pts[:, 1]
 
-            # 3-4. 축소 및 보간 함수 (빈 열/행 채워넣기)
             def find_grid_lines(coords, pitch):
                 sorted_coords = np.sort(coords)
                 lines = []
                 curr_group = [sorted_coords[0]]
                 
-                # 좌표들을 묶어서 실제 존재하는 선(Line) 찾기
                 for c in sorted_coords[1:]:
                     if c - curr_group[-1] <= pitch * 0.5:
                         curr_group.append(c)
@@ -110,7 +114,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                         curr_group = [c]
                 lines.append(np.mean(curr_group))
                 
-                # 비어있는 선(Line)을 간격(pitch)을 이용해 수학적으로 채워넣기
                 if len(lines) < 2: return lines
                 interpolated = [lines[0]]
                 for i in range(1, len(lines)):
@@ -126,12 +129,10 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
             grid_xs = find_grid_lines(xs, pitch)
             grid_ys = find_grid_lines(ys, pitch)
             
-            # 가로/세로 전체 개수
             cols = len(grid_xs)
             rows = len(grid_ys)
             total_wells = cols * rows
 
-            # 3-5. 완벽한 바둑판 포인트 생성 후 다시 원래 각도로 되돌리기
             ideal_grid = []
             for gx in grid_xs:
                 for gy in grid_ys:
@@ -143,16 +144,16 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
             grid_ones = np.hstack([ideal_grid, ones_grid])
             final_grid_points = M_rot_inv.dot(grid_ones.T).T
 
-            # 4. 시각화 및 판정 로직
-            avg_radius = int(np.mean([w[2] for w in raw_positive_wells]))
+            # 3. 시각화 및 판정 로직
+            avg_radius = int(round(np.mean([w[2] for w in raw_positive_wells])))
 
             for gx, gy in final_grid_points:
-                gx, gy = int(gx), int(gy)
+                # 미세한 오프셋 방지를 위해 round 적용
+                gx, gy = int(round(gx)), int(round(gy))
                 
-                # Tab 1용: 파란색 원
-                cv2.circle(grid_img, (gx, gy), avg_radius, (0, 255, 255), 1)
+                # 인식된 가상 격자를 노란색으로 일괄 표기
+                cv2.circle(grid_img, (gx, gy), avg_radius, (255, 255, 0), 1)
                 
-                # 실제 스팟과 매칭 (가까운 곳에 형광이 있는가?)
                 is_pos = False
                 for px, py, pr in raw_positive_wells:
                     if calculate_distance((gx, gy), (px, py)) < (pitch * 0.5):
@@ -161,17 +162,15 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                 
                 if is_pos:
                     matched_pos_count += 1
-                    # Tab 2용: 노란색 테두리 (두께 1)
                     cv2.circle(result_img, (gx, gy), avg_radius, (255, 255, 0), 1)
                 else:
                     matched_neg_count += 1
-                    # Tab 2용: 빨간색 테두리 (두께 1)
                     cv2.circle(result_img, (gx, gy), avg_radius, (255, 0, 0), 1)
 
             ratio = (matched_pos_count / total_wells * 100) if total_wells > 0 else 0
             is_gmo = ratio >= gmo_criteria
 
-    return grid_img, result_img, total_wells, matched_pos_count, matched_neg_count, ratio, is_gmo, len(grid_xs) if 'grid_xs' in locals() else 0, len(grid_ys) if 'grid_ys' in locals() else 0
+    return grid_img, result_img, total_wells, matched_pos_count, matched_neg_count, ratio, is_gmo, cols, rows
 
 # --- Streamlit UI 구성 ---
 st.set_page_config(layout="wide", page_title="Microwell 분석기 Pro")
@@ -186,12 +185,13 @@ with col1:
     
     with st.expander("1️⃣ 판정 기준 및 밝기", expanded=True):
         gmo_criteria = st.slider("GMO 판정 기준 (%)", 1, 100, 50)
-        min_threshold = st.slider("최소 밝기 임계값", 0, 255, 26)
+        # 기본 임계값 조정 (새로운 윤곽선 엔진에 맞춤)
+        min_threshold = st.slider("최소 밝기 임계값", 0, 255, 50)
         max_threshold = st.slider("최대 밝기 임계값", 0, 255, 255)
 
     with st.expander("2️⃣ 스팟 형태 필터링", expanded=True):
         min_area = st.number_input("최소 면적 (픽셀)", min_value=1, max_value=5000, value=10, step=5)
-        max_area = st.number_input("최대 면적 (픽셀)", min_value=10, max_value=50000, value=50, step=10)
+        max_area = st.number_input("최대 면적 (픽셀)", min_value=10, max_value=50000, value=200, step=10)
         circularity = st.slider("최소 원형도", 0.0, 1.0, 0.1, step=0.05)
         convexity = st.slider("최소 볼록성", 0.0, 1.0, 0.3, step=0.05)
 
@@ -201,7 +201,7 @@ with col2:
     if uploaded_file is not None:
         image_pil = Image.open(uploaded_file)
         
-        with st.spinner("가상 격자를 정밀 매핑 중입니다..."):
+        with st.spinner("초정밀 스팟 중심점을 계산하여 격자를 매핑 중입니다..."):
             grid_img, result_img, total, pos, neg, ratio, is_gmo, cols, rows = analyze_microwells(
                 image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria
             )
@@ -210,17 +210,16 @@ with col2:
             
             with tab1:
                 st.subheader("가상 격자(Virtual Grid) 매핑 결과")
-                st.write("계단 현상을 제거하고 배열을 보간하여 완벽한 바둑판 격자를 생성했습니다.")
+                st.write("각 형광 스팟의 정확한 무게중심을 계산하여 중앙에 정렬된 바둑판 격자를 생성했습니다.")
                 
-                # 인식된 배열 형태 추가 출력
                 col_a, col_b = st.columns(2)
                 col_a.metric("추정된 배열 형태", f"가로 {cols} x 세로 {rows} 줄")
                 col_b.metric("계산된 전체 Well 개수", f"{total:,} 개")
                 
                 if total > 0:
-                    st.image(grid_img, caption="파란색 얇은 테두리: 프로그램이 추정한 완벽한 Well 위치", use_column_width=True)
+                    st.image(grid_img, caption="노란색 얇은 테두리: 프로그램이 추출한 정중앙 좌표점", use_column_width=True)
                 else:
-                    st.warning("스팟이 충분히 검출되지 않아 전체 영역을 추정할 수 없습니다.")
+                    st.warning("스팟이 충분히 검출되지 않아 전체 영역을 추정할 수 없습니다. '최소 밝기'를 낮춰보세요.")
                     
             with tab2:
                 st.subheader("Positive / Negative 분류 결과")
@@ -236,7 +235,7 @@ with col2:
                     else:
                         st.success(f"✅ **판정 결과: Non-GMO 입니다.** (기준: {gmo_criteria}%, 현재: {ratio:.1f}%)")
                     
-                    st.image(result_img, caption="노란색: Positive, 빨간색: Negative (두께 1의 얇은 테두리)", use_column_width=True)
+                    st.image(result_img, caption="노란색: Positive, 빨간색: Negative (정확하게 겹쳐진 테두리)", use_column_width=True)
                 else:
                     st.warning("분석할 결과가 없습니다.")
     else:
