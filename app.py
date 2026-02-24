@@ -9,8 +9,8 @@ from scipy.spatial import cKDTree
 def calculate_distance(p1, p2):
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
-# ★ min_pitch 파라미터 추가
-def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria, signal_thresh, min_pitch):
+# ★ 가장자리 필터링 추가: edge_margin 파라미터 추가
+def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria, signal_thresh, min_pitch, edge_margin):
     image_rgb_pil = image_pil.convert('RGB')
     image_rgb = np.array(image_rgb_pil)
     
@@ -25,7 +25,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     raw_positive_wells = []
-    margin = 5
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -44,18 +43,18 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     cx = M["m10"] / M["m00"]
                     cy = M["m01"] / M["m00"]
                     _, radius = cv2.minEnclosingCircle(cnt)
-                    if margin < cx < (img_w - margin) and margin < cy < (img_h - margin):
+                    
+                    # ★ 가장자리 필터링 추가: 사용자가 설정한 edge_margin을 적용하여 외곽 스팟 무시
+                    if edge_margin < cx < (img_w - edge_margin) and edge_margin < cy < (img_h - edge_margin):
                         raw_positive_wells.append((cx, cy, radius))
 
-    # ★ 2. 사용자 지정 '최소 웰 간격(min_pitch)'을 이용한 강력한 중복/노이즈 제거 ★
+    # 2. 사용자 지정 '최소 웰 간격(min_pitch)'을 이용한 강력한 중복/노이즈 제거
     if len(raw_positive_wells) > 10:
-        # 크기가 큰 웰부터 우선적으로 기준을 잡음
         raw_positive_wells.sort(key=lambda x: x[2], reverse=True)
         filtered_wells = []
         for w in raw_positive_wells:
             is_dup = False
             for fw in filtered_wells:
-                # 사용자가 설정한 간격의 80% 이내에 들어오는 스팟은 노이즈(파편)로 간주하고 무시
                 if calculate_distance(w[:2], fw[:2]) < min_pitch * 0.8:
                     is_dup = True
                     break
@@ -66,6 +65,9 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
 
     grid_img = image_rgb.copy()
     result_img = image_rgb.copy()
+    
+    # ★ 가장자리 필터링 추가: 제외되는 영역을 시각적으로 확인할 수 있게 빨간색 테두리 그리기
+    cv2.rectangle(grid_img, (int(edge_margin), int(edge_margin)), (int(img_w - edge_margin), int(img_h - edge_margin)), (255, 0, 0), 2)
     
     total_wells = 0
     matched_pos_count = 0
@@ -83,19 +85,16 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         # 3. KD-Tree를 이용한 진짜 간격(Pitch) 파악
         tree = cKDTree(pts)
         
-        # 근접 노이즈를 건너뛰고 진짜 이웃을 찾기 위해 k를 넉넉하게 잡음
         distances, _ = tree.query(pts, k=min(6, len(pts)))
         valid_pitches = []
         for i in range(len(pts)):
             for k in range(1, distances.shape[1]):
-                # 사용자가 설정한 최소 간격 이상 떨어진 첫 번째 이웃을 진짜 이웃으로 인정
                 if distances[i, k] >= min_pitch * 0.8:
                     valid_pitches.append(distances[i, k])
                     break
                     
         rough_pitch = np.median(valid_pitches) if valid_pitches else min_pitch
 
-        # 각도 계산
         pairs = tree.query_pairs(r=rough_pitch * 1.5)
         angles = []
         for i, j in pairs:
@@ -106,7 +105,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
             angles.append(a_mod)
         grid_angle = np.median(angles) if angles else 0.0
 
-        # 로컬 트래커 방향 벡터
         right_vecs, down_vecs = [], []
         for i, j in pairs:
             dy, dx = pts[j][1] - pts[i][1], pts[j][0] - pts[i][0]
@@ -120,10 +118,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
 
         vec_right = np.median(right_vecs, axis=0) if right_vecs else (rough_pitch, 0)
         vec_down = np.median(down_vecs, axis=0) if down_vecs else (0, rough_pitch)
-
-        min_x, max_x = np.min(pts[:, 0]), np.max(pts[:, 0])
-        min_y, max_y = np.min(pts[:, 1]), np.max(pts[:, 1])
-        bound_margin = rough_pitch * 5
 
         _, start_idx = tree.query([img_w / 2, img_h / 2])
         start_x, start_y = pts[start_idx]
@@ -143,7 +137,9 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                 if (nc, nr) in visited: continue
                 
                 ex, ey = cx + vx, cy + vy
-                if ex < min_x - bound_margin or ex > max_x + bound_margin or ey < min_y - bound_margin or ey > max_y + bound_margin:
+                
+                # ★ 가장자리 필터링 추가: 가상 격자가 마진 바깥으로 증식하는 것을 강력하게 차단
+                if ex < edge_margin or ex > img_w - edge_margin or ey < edge_margin or ey > img_h - edge_margin:
                     continue
 
                 visited.add((nc, nr))
@@ -239,8 +235,12 @@ with col1:
         max_threshold = st.slider("격자 탐색 최대 밝기", 0, 255, 255)
 
     with st.expander("2️⃣ 스팟 형태 필터링 (격자용)", expanded=True):
-        # ★ 새로 추가된 핵심 파라미터 ★
         min_pitch = st.number_input("최소 웰 간격 (Pitch - 픽셀)", min_value=5, max_value=200, value=20, step=1, help="웰 중심과 다음 웰 중심 사이의 최소 거리를 픽셀 단위로 입력하세요. 격자가 너무 촘촘하게(뻥튀기) 잡힐 때 이 값을 올리면 해결됩니다.")
+        
+        # ★ 가장자리 필터링 추가: UI에 슬라이더 반영
+        st.markdown("---")
+        edge_margin = st.number_input("가장자리 제외 여백 (픽셀)", min_value=0, max_value=300, value=30, step=10, help="사진 테두리에서 분석을 제외할 픽셀 두께입니다. 왜곡이 심한 가장자리를 잘라내는 데 유용합니다.")
+        
         st.markdown("---")
         min_area = st.number_input("최소 면적 (픽셀)", min_value=1, max_value=5000, value=5, step=5)
         max_area = st.number_input("최대 면적 (픽셀)", min_value=10, max_value=50000, value=200, step=10)
@@ -254,8 +254,9 @@ with col2:
         image_pil = Image.open(uploaded_file)
         
         with st.spinner("형광 신호를 정밀 측정 중입니다..."):
+            # ★ 가장자리 필터링 추가: 함수 호출 시 edge_margin 전달
             grid_img, result_img, total, pos, neg, ratio, is_gmo, cols, rows = analyze_microwells(
-                image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria, signal_thresh, min_pitch
+                image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria, signal_thresh, min_pitch, edge_margin
             )
             
             tab1, tab2 = st.tabs(["📌 1. 왜곡 보정 가상 격자", "📊 2. 형광 신호 측정 결과"])
@@ -267,7 +268,7 @@ with col2:
                 col_b.metric("계산된 전체 Well 개수", f"{total:,} 개")
                 
                 if total > 0:
-                    st.image(grid_img, caption="청록색: 누적 오차 및 노이즈 중복 없이 추적된 정밀 가상 격자점", use_column_width=True)
+                    st.image(grid_img, caption="청록색: 가상 격자점 / 빨간선: 분석에서 제외된 가장자리 마진", use_column_width=True)
                 else:
                     st.warning("스팟이 충분히 검출되지 않았습니다. 격자 탐색 밝기나 면적 설정을 조절해주세요.")
                     
