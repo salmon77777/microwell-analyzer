@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 def calculate_distance(p1, p2):
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
+# 파라미터에서 edge_margin 제거
 def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria, signal_thresh, min_pitch):
     image_rgb_pil = image_pil.convert('RGB')
     image_rgb = np.array(image_rgb_pil)
@@ -18,13 +19,15 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     
     img_h, img_w = gray_img.shape[:2]
 
+    # ★ UI 파라미터 대신 내부적으로 0으로 고정
+    edge_margin = 0 
+
     # 1. 격자 기준점 찾기 (모양 필터링 적용)
     blurred = cv2.GaussianBlur(gray_img, (3, 3), 0)
     _, thresh = cv2.threshold(blurred, min_threshold, max_threshold, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     raw_positive_wells = []
-    margin = 5 # 기본 최소 여백만 유지
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -44,7 +47,8 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     cy = M["m01"] / M["m00"]
                     _, radius = cv2.minEnclosingCircle(cnt)
                     
-                    if margin < cx < (img_w - margin) and margin < cy < (img_h - margin):
+                    # 0으로 고정된 제한 적용
+                    if edge_margin <= cx <= (img_w - edge_margin) and edge_margin <= cy <= (img_h - edge_margin):
                         raw_positive_wells.append((cx, cy, radius))
 
     # 2. 사용자 지정 '최소 웰 간격(min_pitch)'을 이용한 강력한 중복/노이즈 제거
@@ -115,10 +119,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
         vec_right = np.median(right_vecs, axis=0) if right_vecs else (rough_pitch, 0)
         vec_down = np.median(down_vecs, axis=0) if down_vecs else (0, rough_pitch)
 
-        min_x, max_x = np.min(pts[:, 0]), np.max(pts[:, 0])
-        min_y, max_y = np.min(pts[:, 1]), np.max(pts[:, 1])
-        bound_margin = rough_pitch * 5
-
         _, start_idx = tree.query([img_w / 2, img_h / 2])
         start_x, start_y = pts[start_idx]
 
@@ -137,7 +137,9 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                 if (nc, nr) in visited: continue
                 
                 ex, ey = cx + vx, cy + vy
-                if ex < min_x - bound_margin or ex > max_x + bound_margin or ey < min_y - bound_margin or ey > max_y + bound_margin:
+                
+                # ★ 핵심: 이미지 크기를 벗어나는 순간 탐색을 칼같이 종료
+                if ex < edge_margin or ex > img_w - edge_margin or ey < edge_margin or ey > img_h - edge_margin:
                     continue
 
                 visited.add((nc, nr))
@@ -248,6 +250,7 @@ with col2:
         image_pil = Image.open(uploaded_file)
         
         with st.spinner("형광 신호를 정밀 측정 중입니다..."):
+            # 파라미터에서 edge_margin 제외하고 호출
             grid_img, result_img, total, pos, neg, ratio, is_gmo, cols, rows = analyze_microwells(
                 image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria, signal_thresh, min_pitch
             )
