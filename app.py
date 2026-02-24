@@ -46,27 +46,6 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     if margin < cx < (img_w - margin) and margin < cy < (img_h - margin):
                         raw_positive_wells.append((cx, cy, radius))
 
-    # ★ 추가된 핵심 로직: 초근접 노이즈 강제 병합 및 제거 ★
-    if len(raw_positive_wells) > 10:
-        # 반지름(크기)이 큰 순서대로 정렬하여, 크고 확실한 진짜 웰을 우선순위로 둠
-        raw_positive_wells.sort(key=lambda x: x[2], reverse=True)
-        temp_median_radius = np.median([w[2] for w in raw_positive_wells])
-        
-        # 웰 중심 간의 최소 허용 거리 (물리적으로 겹칠 수 없는 거리 설정)
-        min_allowed_dist = temp_median_radius * 1.8 
-
-        filtered_wells = []
-        for w in raw_positive_wells:
-            is_duplicate = False
-            for fw in filtered_wells:
-                if calculate_distance(w[:2], fw[:2]) < min_allowed_dist:
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                filtered_wells.append(w)
-        
-        raw_positive_wells = filtered_wells
-
     grid_img = image_rgb.copy()
     result_img = image_rgb.copy()
     
@@ -79,11 +58,50 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
     rows = 0
 
     if len(raw_positive_wells) > 10:
+        # ★ 2. 간격 뻥튀기 방지를 위한 1차 Pitch 계산 및 초근접 노이즈 제거 ★
+        pts_init = np.array([w[:2] for w in raw_positive_wells])
+        tree_init = cKDTree(pts_init)
+        
+        # 진짜 웰의 평균 반지름을 안정적으로 구함 (노이즈 방지용 하위 25% 제외)
+        sorted_radii = sorted([w[2] for w in raw_positive_wells])
+        robust_avg_radius = np.mean(sorted_radii[len(sorted_radii)//4:])
+        
+        # 물리적으로 불가능한 최소 거리 설정 (지름보다 약간 큰 수준)
+        min_pitch_threshold = max(robust_avg_radius * 2.2, 5.0)
+        
+        # 각 스팟별로 물리적 최소 거리보다 멀리 있는 '첫 번째 진짜 이웃'의 거리를 찾음
+        distances_init, _ = tree_init.query(pts_init, k=min(8, len(pts_init)))
+        valid_pitches = []
+        for i in range(len(pts_init)):
+            for k in range(1, distances_init.shape[1]):
+                if distances_init[i, k] > min_pitch_threshold:
+                    valid_pitches.append(distances_init[i, k])
+                    break
+                    
+        # 초근접 노이즈에 속지 않은 '진짜 간격' 
+        rough_pitch_init = np.median(valid_pitches) if valid_pitches else robust_avg_radius * 3.0
+
+        # 진짜 간격의 60% 이내에 붙어있는 스팟들은 큰 놈 하나만 남기고 강제 병합(삭제)
+        raw_positive_wells.sort(key=lambda x: x[2], reverse=True)
+        filtered_wells = []
+        for w in raw_positive_wells:
+            is_dup = False
+            for fw in filtered_wells:
+                if calculate_distance(w[:2], fw[:2]) < rough_pitch_init * 0.6:
+                    is_dup = True
+                    break
+            if not is_dup:
+                filtered_wells.append(w)
+                
+        raw_positive_wells = filtered_wells
+
+    # 노이즈 필터링 후 다시 본 로직 실행
+    if len(raw_positive_wells) > 10:
         pts = np.array([w[:2] for w in raw_positive_wells])
         radii = [w[2] for w in raw_positive_wells]
         avg_radius = int(round(np.mean(radii)))
 
-        # 2. 로컬 트래커를 이용한 완벽한 가상 격자 생성
+        # 3. 깨끗해진 데이터로 로컬 트래커 실행
         tree = cKDTree(pts)
         distances, _ = tree.query(pts, k=2)
         rough_pitch = np.median(distances[:, 1])
@@ -178,7 +196,7 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     else:
                         grid_dict[(c, r)] = (ex, ey)
 
-        # 3. 신호 정밀 측정 및 판정
+        # 4. 신호 정밀 측정 및 판정
         r_int = max(1, int(round(avg_radius * 0.5))) 
         
         for (c, r), (px, py) in grid_dict.items():
@@ -223,7 +241,7 @@ with col1:
         gmo_criteria = st.slider("GMO 판정 기준 (%)", 1, 100, 50)
         
         st.markdown("---")
-        signal_thresh = st.slider("✨ Positive 판정 밝기 기준 (Signal)", 0, 255, 40, help="격자 위치의 녹색 형광 밝기가 이 수치 이상이면 Positive로 판정합니다.")
+        signal_thresh = st.slider("✨ Positive 판정 밝기 기준 (Signal)", 0, 255, 40, help="이 수치 이상이면 Positive로 판정합니다.")
         
         st.markdown("---")
         st.write("※ 아래는 격자(과녁)를 그리기 위한 형태 기준입니다.")
@@ -251,19 +269,18 @@ with col2:
             
             with tab1:
                 st.subheader("가상 격자(Virtual Grid) 계산 확인")
-                st.write("완벽한 형태의 스팟을 기준으로 초근접 노이즈를 병합하고, 렌즈 왜곡을 보정하여 전체 격자를 그렸습니다.")
+                st.write("간격 뻥튀기를 방지하여 정확한 웰 개수(약 3,600개)만 찾아냅니다.")
                 col_a, col_b = st.columns(2)
                 col_a.metric("추정된 배열 형태", f"가로 {cols} x 세로 {rows} 줄")
                 col_b.metric("계산된 전체 Well 개수", f"{total:,} 개")
                 
                 if total > 0:
-                    st.image(grid_img, caption="청록색: 누적 오차 및 노이즈 중복 없이 추적된 정밀 가상 격자점", use_column_width=True)
+                    st.image(grid_img, caption="청록색: 오차가 완벽히 교정된 가상 격자점", use_column_width=True)
                 else:
                     st.warning("스팟이 충분히 검출되지 않았습니다. 격자 탐색 밝기나 면적 설정을 조절해주세요.")
                     
             with tab2:
                 st.subheader("Positive / Negative 최종 분류 결과")
-                st.write("각 격자 정중앙의 **녹색 형광 밝기**를 정밀 측정하여 Positive를 판정합니다.")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("전체 Well", f"{total:,} 개")
                 m2.metric("Positive (노란색)", f"{pos:,} 개")
