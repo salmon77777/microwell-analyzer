@@ -6,13 +6,14 @@ import math
 import collections
 from scipy.spatial import cKDTree
 
+def calculate_distance(p1, p2):
+    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
 def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria, signal_thresh):
     image_rgb_pil = image_pil.convert('RGB')
     image_rgb = np.array(image_rgb_pil)
     
-    # 격자 추적용 Grayscale 이미지
     gray_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-    # ★ 신호 측정용 녹색(Green) 채널 이미지 분리 (형광 인식 극대화)
     green_channel = image_rgb[:, :, 1]
     
     img_h, img_w = gray_img.shape[:2]
@@ -44,6 +45,27 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     _, radius = cv2.minEnclosingCircle(cnt)
                     if margin < cx < (img_w - margin) and margin < cy < (img_h - margin):
                         raw_positive_wells.append((cx, cy, radius))
+
+    # ★ 추가된 핵심 로직: 초근접 노이즈 강제 병합 및 제거 ★
+    if len(raw_positive_wells) > 10:
+        # 반지름(크기)이 큰 순서대로 정렬하여, 크고 확실한 진짜 웰을 우선순위로 둠
+        raw_positive_wells.sort(key=lambda x: x[2], reverse=True)
+        temp_median_radius = np.median([w[2] for w in raw_positive_wells])
+        
+        # 웰 중심 간의 최소 허용 거리 (물리적으로 겹칠 수 없는 거리 설정)
+        min_allowed_dist = temp_median_radius * 1.8 
+
+        filtered_wells = []
+        for w in raw_positive_wells:
+            is_duplicate = False
+            for fw in filtered_wells:
+                if calculate_distance(w[:2], fw[:2]) < min_allowed_dist:
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                filtered_wells.append(w)
+        
+        raw_positive_wells = filtered_wells
 
     grid_img = image_rgb.copy()
     result_img = image_rgb.copy()
@@ -156,26 +178,22 @@ def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_ar
                     else:
                         grid_dict[(c, r)] = (ex, ey)
 
-        # 3. ★ 신호 정밀 측정 및 판정 (모양 무시, 오직 밝기로만 판정)
-        # 스팟 중앙부 50% 영역의 녹색 형광 강도만 정밀 측정
+        # 3. 신호 정밀 측정 및 판정
         r_int = max(1, int(round(avg_radius * 0.5))) 
         
         for (c, r), (px, py) in grid_dict.items():
             px, py = int(round(px)), int(round(py))
             cv2.circle(grid_img, (px, py), avg_radius, (0, 255, 255), 1)
             
-            # 측정 영역이 이미지 범위를 벗어나지 않도록 처리
             y1, y2 = max(0, py - r_int), min(img_h, py + r_int)
             x1, x2 = max(0, px - r_int), min(img_w, px + r_int)
             roi_green = green_channel[y1:y2, x1:x2]
             
-            # 측정 영역의 녹색 형광 평균 밝기 계산
             if roi_green.size > 0:
                 intensity = np.mean(roi_green)
             else:
                 intensity = 0
                 
-            # 설정한 신호 기준치를 넘으면 Positive! (모양이 찌그러져도 상관없음)
             is_pos = intensity >= signal_thresh
             
             if is_pos:
@@ -205,7 +223,6 @@ with col1:
         gmo_criteria = st.slider("GMO 판정 기준 (%)", 1, 100, 50)
         
         st.markdown("---")
-        # ★ 신호 판정용 슬라이더 추가 (이 수치로 Positive/Negative가 갈립니다)
         signal_thresh = st.slider("✨ Positive 판정 밝기 기준 (Signal)", 0, 255, 40, help="격자 위치의 녹색 형광 밝기가 이 수치 이상이면 Positive로 판정합니다.")
         
         st.markdown("---")
@@ -234,13 +251,13 @@ with col2:
             
             with tab1:
                 st.subheader("가상 격자(Virtual Grid) 계산 확인")
-                st.write("완벽한 형태의 스팟을 기준으로 렌즈 왜곡을 보정하여 전체 격자를 그렸습니다.")
+                st.write("완벽한 형태의 스팟을 기준으로 초근접 노이즈를 병합하고, 렌즈 왜곡을 보정하여 전체 격자를 그렸습니다.")
                 col_a, col_b = st.columns(2)
                 col_a.metric("추정된 배열 형태", f"가로 {cols} x 세로 {rows} 줄")
                 col_b.metric("계산된 전체 Well 개수", f"{total:,} 개")
                 
                 if total > 0:
-                    st.image(grid_img, caption="청록색: 누적 오차 없이 완벽하게 추적된 정밀 가상 격자점", use_column_width=True)
+                    st.image(grid_img, caption="청록색: 누적 오차 및 노이즈 중복 없이 추적된 정밀 가상 격자점", use_column_width=True)
                 else:
                     st.warning("스팟이 충분히 검출되지 않았습니다. 격자 탐색 밝기나 면적 설정을 조절해주세요.")
                     
