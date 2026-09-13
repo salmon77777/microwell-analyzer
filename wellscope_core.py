@@ -1,4 +1,4 @@
-"""WellScope LAMP 1.0.0 — reproducible, native-pixel microwell measurements.
+"""WellScope LAMP 1.1.0 — reproducible, native-pixel microwell measurements.
 
 This module intentionally does not infer GMO content from a filename or from a
 positive-well percentage alone. It has no network, Streamlit, or AI dependency.
@@ -25,7 +25,7 @@ from scipy.spatial import cKDTree
 
 APP_NAME = "WellScope LAMP"
 APP_SUBTITLE = "Microwell fluorescence analysis"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ENGINE_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 MAX_FILE_BYTES = 30 * 1024 * 1024
 MAX_PIXELS = 16_000_000

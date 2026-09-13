@@ -150,12 +150,22 @@ def method_text(result: dict, sample_id: str, reviewed: bool) -> str:
     return text
 
 
+
+def decision_text(result: dict) -> str:
+    screen=result["summary"].get("screening")
+    if screen:
+        threshold=screen["study_threshold_pct"]
+        if screen["decision"]=="At/above study threshold":return f"GMO screen positive | >= {threshold:g}% study class"
+        if screen["decision"]=="Below study threshold":return f"Below {threshold:g}% study screen | not GMO-free certification"
+        return screen["decision"]
+    return result["summary"]["calibration"].get("decision","Not evaluated")
+
 def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
     """Editable vector labels with embedded raster evidence, independent of browser size."""
     s=result["summary"];images=overlays(result,max_side=1200);esc=html.escape
     title=esc(sample_id[:65]);cal=s["calibration"];est=cal.get("estimated_content_pct")
-    content=f"{est:.2f}%" if est is not None else "Not calibrated"
-    decision=cal.get("decision","Not evaluated")
+    content=f"{est:.2f}%" if est is not None else "Not quantified"
+    decision=decision_text(result)
     badge="SYNTHETIC DEMONSTRATION" if s["source_kind"]=="synthetic" else ("FIXED THRESHOLD" if s["threshold_mode"]=="fixed" else "EXPLORATORY ANALYSIS")
     svg=[f'<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1140" viewBox="0 0 1800 1140">',
          '<rect width="1800" height="1140" fill="white"/>',
@@ -174,7 +184,7 @@ def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
         legend=[f"Native input: {s['image']['width']} x {s['image']['height']} px", "Cyan +: measured; grey square: excluded", "Yellow circle: positive; red x: negative"][i]
         svg.append(f'<text x="{x}" y="759" font-size="17" fill="#617184">{esc(legend)}</text>')
     labels=[("Measurable wells",f"{s['valid_wells']:,}"),("Threshold-positive",f"{s['positive_wells']:,}"),
-            ("Positive fraction",f"{s['positive_fraction_pct']:.2f}%"),("Estimated content",content)]
+            ("Positive fraction",f"{s['positive_fraction_pct']:.2f}%"),("Estimated mixture",content)]
     for i,(labeltext,value) in enumerate(labels):
         x=45+i*435
         svg.append(f'<rect x="{x}" y="799" width="405" height="108" rx="9" fill="#f4f7f9"/>')
@@ -189,6 +199,11 @@ def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
     if est is not None:
         lines[-1]=f"Basis: {cal['quantity_basis']} | Study threshold: {cal['study_threshold_pct']:g}% | Review band is not a confidence interval; not non-GMO certification."
     for i,line in enumerate(lines):svg.append(f'<text x="45" y="{993+i*32}" font-size="17" fill="#617184">{esc(line)}</text>')
+    if s.get("screening"):
+        sc=s["screening"]
+        evidence="TRAINING IMAGE - NOT INDEPENDENT VALIDATION" if sc["training_image_match"] else "NEW IMAGE - MODEL NOT INDEPENDENTLY VALIDATED"
+        svg.append(f'<rect x="40" y="1040" width="1730" height="42" fill="white"/>')
+        svg.append(f'<text x="45" y="1068" font-size="17" fill="#617184">{esc(evidence)} | score {sc["score"]:.5f} | cutoff {sc["sample_score_cutoff"]:.5f}</text>')
     cautions=[q["code"] for q in s["qc_flags"] if q["severity"]=="warning"]
     qc_line="QC notes: "+("; ".join(cautions[:4]) if cautions else "See full report; not an assay-validation certificate")
     svg.append(f'<text x="45" y="1093" font-size="15" fill="#617184">{esc(qc_line)}</text>')
@@ -197,26 +212,31 @@ def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
 
 def report_html(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
     esc=html.escape;s=result["summary"];imgs=overlays(result);cal=s["calibration"]
-    est=cal.get("estimated_content_pct");content=f"{est:.2f}%" if est is not None else "Not calibrated"
+    est=cal.get("estimated_content_pct");content=f"{est:.2f}%" if est is not None else "Not quantified"
     state="Synthetic demonstration" if s["source_kind"]=="synthetic" else ("Fixed-threshold analysis" if s["threshold_mode"]=="fixed" else "Exploratory analysis")
     metrics=[("Measurable wells",f"{s['valid_wells']:,}"),("Threshold-positive wells",f"{s['positive_wells']:,}"),
-             ("Positive-well fraction",f"{s['positive_fraction_pct']:.2f}%"),("Estimated content",content)]
+             ("Positive-well fraction",f"{s['positive_fraction_pct']:.2f}%"),("Estimated mixture",content)]
     metric_html=''.join(f'<div class="metric"><span>{a}</span><strong>{b}</strong></div>' for a,b in metrics)
     cards=''.join(f'<section class="imagecard"><h2>{heading}</h2><img src="{_data_uri(png_bytes(imgs[key]))}"><p>{note}</p></section>' for key,heading,note in [
         ("raw","A / Input image",f"{s['image']['width']} x {s['image']['height']} native pixels; display enlarged only."),
         ("grid","B / Fitted grid","Cyan +: measurable positions; grey square: excluded."),
         ("classification","C / Well classification","Yellow circle: threshold-positive; red x: negative; grey square: excluded.")])
     flags=''.join(f'<li><b>{esc(q["code"])}</b> — {esc(q["message"])}</li>' for q in s['qc_flags'])
+    screen=s.get("screening")
+    screening_note=""
+    if screen:
+        evidence="Training-image reanalysis; not independent validation" if screen["training_image_match"] else "New-image prediction; model not independently validated"
+        screening_note=f'<p class="small"><b>{esc(evidence)}</b><br>Sample score: {screen["score"]:.5f}; sample cutoff: {screen["sample_score_cutoff"]:.5f}; model: {screen["model_id"]}</p>'
     config=json.dumps(completed_summary(result,sample_id,reviewed),ensure_ascii=False,indent=2,allow_nan=False)
     out=f'''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(APP_NAME)} | {esc(sample_id)}</title>
 <style>
 *{{box-sizing:border-box}}body{{font-family:Arial,Helvetica,sans-serif;margin:0;background:#eef3f6;color:#182f45}}main{{max-width:1460px;margin:28px auto;background:white;padding:36px 42px;border-radius:16px}}header{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #dce5ea;padding-bottom:24px}}h1{{font-size:32px;margin:0;letter-spacing:-.7px}}.sub{{color:#637589;margin:8px 0 0}}.meta{{text-align:right;font-size:14px;line-height:1.8}}.badge{{color:#276473;background:#edf7f8;border-radius:20px;padding:7px 14px;display:inline-block;font-size:13px}}.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:26px 0}}.metric{{padding:20px;background:#f5f8fa;border:1px solid #e0e8ed;border-radius:10px}}.metric span{{font-size:13px;color:#607589;display:block}}.metric strong{{display:block;font-size:29px;margin-top:10px;letter-spacing:-.5px}}.images{{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}}h2{{font-size:18px}}.imagecard img{{width:100%;aspect-ratio:1;object-fit:contain;background:#05090b;border-radius:6px}}.imagecard p{{font-size:12px;color:#637589;line-height:1.5;min-height:36px}}.decision{{border:1px solid #dfe7ec;background:#f9fbfc;border-left:4px solid #487f8e;border-radius:8px;padding:16px 20px;margin:22px 0;line-height:1.7}}.decision strong{{font-size:20px}}.small{{font-size:12px;color:#637589;line-height:1.6}}.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:24px}}.chart{{width:100%}}li{{font-size:13px;margin:8px 0;line-height:1.5}}details{{margin-top:18px;border-top:1px solid #dfe7ec;padding-top:16px}}summary{{cursor:pointer}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f8fa;padding:18px;font-size:12px}}.method{{line-height:1.8;font-size:14px}}@media(max-width:800px){{main{{padding:20px}}.metrics,.images,.grid2{{grid-template-columns:1fr}}header{{display:block}}.meta{{text-align:left;margin-top:15px}}}}@media print{{body{{background:white}}main{{margin:0;padding:10px;max-width:none}}details{{break-inside:avoid}}.images,.metrics{{break-inside:avoid}}}}
 </style><main><header><div><h1>{esc(APP_NAME)}</h1><p class="sub">{esc(APP_SUBTITLE)}</p></div><div class="meta"><div class="badge">{esc(state)}</div><br>Sample: <b>{esc(sample_id)}</b><br>Profile: {s['profile_id']} &nbsp; / &nbsp; v{VERSION}</div></header>
 <div class="metrics">{metric_html}</div><div class="images">{cards}</div>
-<div class="decision"><strong>{esc(cal.get('decision','Not evaluated'))}</strong><br>Positive-well fraction and GMO content are different quantities. A below-threshold result is not a non-GMO certification.</div>
+<div class="decision"><strong>{esc(decision_text(result))}</strong><br>Positive-well fraction and GMO content are different quantities. A below-threshold result is not a non-GMO certification.</div>
 <p class="small">Native threshold: {s['threshold_native']:.4g} | Negative wells: {s['negative_wells']:,} | Excluded positions: {s['excluded_wells']:,} | Operator grid review: {'recorded' if reviewed else 'not recorded'}<br>Software geometric checks are not evidence of filling, amplification validity or analytical accuracy.</p>
-<div class="grid2"><section><h2>Signal distribution</h2><img class="chart" src="{_data_uri(histogram_bytes(result))}"></section><section><h2>Quality-control notes</h2><ul>{flags}</ul></section></div>
-<details><summary>Reproducible method text</summary><p class="method">{esc(method_text(result,sample_id,reviewed))}</p></details>
+{screening_note}<div class="grid2"><section><h2>Signal distribution</h2><img class="chart" src="{_data_uri(histogram_bytes(result))}"></section><section><h2>Quality-control notes</h2><ul>{flags}</ul></section></div>
+
 <details><summary>Full analysis record / JSON</summary><pre>{esc(config)}</pre></details>
 <p class="small">Data source: {esc(s['source_kind'])} | Image SHA-256: {s['image']['raw_sha256']}<br>No calibration coefficients, confidence intervals or experimental validation statistics are fabricated by this report.</p></main></html>'''
     return out.encode('utf-8')
@@ -232,10 +252,13 @@ def export_bundle(result: dict, sample_id: str, reviewed: bool, original_data: b
         z.writestr('summary.json',json_bytes(s))
         row={key:s[key] for key in ("sample_id","source_kind","software_version","valid_wells","positive_wells","negative_wells","excluded_wells","positive_fraction_pct","threshold_native","threshold_mode","profile_id")}
         row.update(image_sha256=s["image"]["raw_sha256"],estimated_content_pct=s["calibration"].get("estimated_content_pct"),quantity_basis=s["calibration"].get("quantity_basis"),decision=s["calibration"].get("decision"),operator_grid_reviewed=bool(reviewed))
+        screen=s.get('screening')
+        if screen:
+            row.update(screening_decision=screen['decision'],sample_score=screen['score'],sample_score_cutoff=screen['sample_score_cutoff'],training_image_match=screen['training_image_match'],model_id=screen['model_id'])
         z.writestr('sample_summary.csv',csv_bytes(pd.DataFrame([row])))
         z.writestr('analysis_profile.json',json_bytes(result['profile']))
         z.writestr('grid_template.json',export_template(result))
-        z.writestr('methods.txt',method_text(result,sample_id,reviewed))
+        # Retain settings/QC records, without an unsolicited manuscript-writing paragraph.
         for name,array in images.items():z.writestr(name+'_display.png',png_bytes(array))
         z.writestr('signal_histogram.png',histogram_bytes(result))
         z.writestr('signal_histogram.svg',histogram_bytes(result,'svg'))

@@ -166,7 +166,8 @@ def test_report_escapes_html(demo_result):
 def test_bundle_complete(demo_result):
     data=export_bundle(demo_result,'Test',False)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        assert set(['per_well.csv','summary.json','analysis_panel.svg','analysis_profile.json','grid_template.json','methods.txt','report.html']).issubset(z.namelist())
+        assert 'methods.txt' not in z.namelist()
+        assert set(['per_well.csv','summary.json','analysis_panel.svg','analysis_profile.json','grid_template.json','report.html']).issubset(z.namelist())
         s=json.loads(z.read('summary.json'));assert s['positive_wells']==demo_result['summary']['positive_wells']
 
 def test_csv_formula_protection():

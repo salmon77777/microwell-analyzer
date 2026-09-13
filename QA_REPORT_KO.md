@@ -1,30 +1,30 @@
-# 소프트웨어 시험 기록 — WellScope LAMP v1.0.0
+# WellScope LAMP v1.1.0 — 실제 점검 범위
 
-작성일: 2026-09-13
+## 실행 환경
+Python 3.13.5; numpy 2.3.5; scipy 1.17.0; pandas 2.2.3; Pillow 12.3.0; opencv-python-headless 4.13.0.92; matplotlib 3.10.8.
 
-## 실시한 시험
+## 수행한 점검
+- Python 모듈 문법 컴파일.
+- 자동 시험 62개 통과: 기존 core/export 35개, 새 batch/model/export 27개.
+- 공통 threshold 적용, 원본 배열 불변, 양성/음성 합계, 자료형 유지, 잘못된 입력 거부.
+- 훈련 이미지 이름 변경 시에도 hash로 학습 이미지 판별, 파일명을 예측값으로 사용하지 않음.
+- 모델 checksum/engine 버전, 광학/측정 설정, bit depth, 허용 이미지 크기, pitch 호환성 점검.
+- 모델 클래스 중첩, 비단조/포화 정량 보류, 변경 threshold/프로필 거부.
+- 실제 사용자가 제공한 이미지 10장으로 계산 및 전체 결과 묶음 생성.
+- UI Python 분기 6개를 테스트 대역으로 점검: 시작, 단일 자동, 모델, 논문용 화면, 표준 일괄, 모델 미업로드.
+- Chromium으로 다크 배경의 metric CSS 컴포넌트와 독립 HTML 보고서 표시 확인. Metric value rgb(25,51,72); card background rgb(247,249,251).
+- A4 세로 SVG/PDF/PPTX 생성; PDF page size 210 x 297 mm 확인; PyMuPDF와 LibreOffice 렌더링으로 배치 확인.
 
-- Python 3.13.5에서 세 Python 모듈 및 CLI의 문법 컴파일 확인.
-- `python -m pytest tests -q` 결과: **35 passed, 1 skipped**.
-- 시험 항목: 입력 오류, grayscale/16-bit 보존, alpha 처리, multipage 거부, 기본 격자 처리, 고유 좌표, 주석 이미지와 원본 분리, 템플릿 재현, 음성 이미지에서 템플릿 계수, 수동 격자, 잘못된 모서리, 제외 사유 기록, ROI, 프로필 검증, 보정표 처리, 외삽 방지, HTML 이스케이프, CSV formula injection 방어, ZIP 구성.
-- 별도로 사용자가 제공한 이미지에서 분석 엔진 실행 및 결과 파일 생성을 확인. 실제 실험 이미지는 이 공개 배포용 코드 패키지에 포함하지 않음.
-- 실제 계산에서 생성된 독립 HTML/SVG 보고서를 시스템 Chromium에서 렌더링하고 시각적 배치를 확인.
+## 수행하지 못한 점검
+- Streamlit 패키지를 설치할 네트워크 연결이 없어 실제 Streamlit AppTest 1개를 건너뜀.
+- UI 테스트 대역과 CSS 컴포넌트 검사는 실제 Streamlit 브라우저 및 Cloud 배포 검사가 아님.
+- 사용자의 GitHub 저장소와 Community Cloud는 직접 수정/배포하지 않음.
+- 실제 well 정답 위치/수동 계수와의 정확도 비교, 독립 시료의 assay 성능 검증은 수행하지 않음.
 
-## 실시하지 않은 시험
+## 배포 후 확인할 항목
+v1.1.0 제목, 업로드→분석 실행, 상단 숫자 대비, 표준 일괄 분석, 모델 저장/재업로드, 단일 이미지 선별, 입력 변경 후 이전 결과 숨김, CSV/SVG/HTML/ZIP 다운로드를 확인하세요.
 
-- 실제 Streamlit UI 시험은 패키지가 이 환경에 설치되어 있지 않고 패키지 다운로드 네트워크가 제한되어 실행하지 못함. `tests/test_streamlit_app.py`는 해당 상황에서 skip됨. 배포 환경에 Streamlit이 설치된 후 실행할 수 있는 시험 코드가 포함되어 있음.
-- 사용자의 GitHub 저장소 수정, Community Cloud 빌드 또는 운영 배포 확인은 수행하지 않음.
-- 정답이 확인된 수동 well annotation과의 정확도 비교를 수행하지 않음.
-- 독립 대조군/표준/미지 시료의 분석적·생물학적 검증, 실제 GMO 함량 정확도, 감도/특이도/LOD/LOQ/측정불확도를 확정하지 않음.
+## 해석 제한
+소프트웨어 시험 통과는 실험 검증 통과가 아닙니다. 표준을 학습/출력에 함께 쓰는 것은 개발 예시입니다. well 수를 독립 반응 시료 수로 세지 않고, 확보하지 않은 오차 막대·정확도·신뢰구간을 생성하지 않습니다.
 
-## 재현용 계산 패키지
-
-numpy 2.3.5, scipy 1.17.0, pandas 2.2.3, Pillow 12.3.0,
-opencv-python-headless 4.13.0.92, matplotlib 3.10.8.
-
-배포용 Streamlit은 공식 API와 릴리스 자료를 확인해 1.61.0으로 고정했지만,
-이 환경에서 설치·실행을 완료한 패키지로 오해하지 말 것.
-
-## 판독상의 제한
-
-자동 임계값은 탐색용이다. 저장된 프로필이나 고정 임계값은 측정 정의를 재현하는 수단이지 검증 완료 인증이 아니다. 자동 추정한 행·열/계수는 사람의 정답 annotation이 아니다. 공개용 실험 데이터, 임의의 보정 계수, 가짜 정확도나 신뢰구간을 패키지에 넣지 않았다.
+기존 방법 문장 UI와 자동 methods.txt는 요청에 따라 제거했습니다. 함수 method_text는 호환성을 위해 코드에만 남아 있으며 앱 화면에 표시되지 않습니다. 감사용 측정 설정/QC는 JSON으로 보존됩니다.
