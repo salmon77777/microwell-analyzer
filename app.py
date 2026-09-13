@@ -1,311 +1,306 @@
-import streamlit as st
-import cv2
+"""Run: streamlit run app.py
+
+UI is intentionally separated from measurement and export code. Upload all
+three .py files plus requirements.txt into the SAME GitHub directory.
+"""
+from __future__ import annotations
+from dataclasses import asdict, replace
+import hashlib
+import html
+import io
+import json
+import traceback
+
 import numpy as np
-from PIL import Image
-import math
-import collections
-from scipy.spatial import cKDTree
+import pandas as pd
+import streamlit as st
 
-def calculate_distance(p1, p2):
-    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+from wellscope_core import (
+    APP_NAME, APP_SUBTITLE, VERSION, AnalysisError, Settings, BASES, CAL_COLUMNS, analyze, calibrate,
+    decode_image, export_template, json_bytes, object_hash, read_profile, synthetic_demo,
+)
+from wellscope_report import (
+    overlays, png_bytes, histogram_bytes, signal_plot_bytes, calibration_plot_bytes,
+    panel_svg, report_html, csv_bytes, completed_summary, export_bundle, method_text, safe_id,
+)
 
-def analyze_microwells(image_pil, min_threshold, max_threshold, min_area, max_area, circularity_thresh, convexity_thresh, gmo_criteria, signal_thresh, min_pitch):
-    image_rgb_pil = image_pil.convert('RGB')
-    image_rgb = np.array(image_rgb_pil)
-    
-    gray_img = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-    green_channel = image_rgb[:, :, 1]
-    
-    img_h, img_w = gray_img.shape[:2]
+st.set_page_config(page_title=APP_NAME, page_icon="🔬", layout="wide", initial_sidebar_state="expanded")
+st.markdown('''<style>
+.block-container{padding-top:2rem;padding-bottom:2rem;max-width:1580px}
+[data-testid="stSidebar"]{border-right:1px solid #e3e9ee}
+.ws-brand{font-family:Arial,Helvetica,sans-serif;color:#193348;font-size:38px;font-weight:750;letter-spacing:-1.2px;line-height:1.2}
+.ws-sub{font-family:Arial,Helvetica,sans-serif;color:#64798b;font-size:16px;margin:8px 0 18px}
+.ws-tag{font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#3c7685;background:#edf6f8;border:1px solid #d9eaee;border-radius:18px;padding:5px 12px;display:inline-block;margin-bottom:14px}
+.ws-note{font-family:Arial,Helvetica,sans-serif;color:#5f7485;font-size:13px;line-height:1.6;padding:13px 16px;border-radius:8px;background:#f5f8fa;margin:8px 0 16px}
+[data-testid="stMetric"]{border:1px solid #e0e8ed;padding:14px 16px;border-radius:10px;background:#f7f9fb}
+[data-testid="stMetricLabel"]{font-size:13px;color:#607587}
+[data-testid="stMetricValue"]{font-size:28px}
+div.stButton>button[kind="primary"]{border-radius:8px}
+</style>''', unsafe_allow_html=True)
 
-    # 1. 격자 기준점 찾기 (모양 필터링 적용)
-    blurred = cv2.GaussianBlur(gray_img, (3, 3), 0)
-    _, thresh = cv2.threshold(blurred, min_threshold, max_threshold, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+with st.sidebar:
+    lang=st.selectbox("언어 / Language",["한국어","English"],key="language")
+EN=lang=="English"
+def t(ko: str,en: str)->str:return en if EN else ko
 
-    raw_positive_wells = []
-    margin = 5
-    
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if min_area <= area <= max_area:
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0: continue
-            circularity = 4 * np.pi * (area / (perimeter * perimeter))
-            hull = cv2.convexHull(cnt)
-            hull_area = cv2.contourArea(hull)
-            if hull_area == 0: continue
-            convexity = area / hull_area
+def show_expected_error(exc: Exception) -> None:
+    st.error(t("분석을 완료하지 못했습니다. 아래 원인과 조치 내용을 확인하세요.","Analysis could not be completed. Review the cause and guidance below."))
+    message=str(exc)
+    st.write(message)
+    lower=message.lower()
+    if any(word in lower for word in ("grid","geometry","lattice","pitch","candidate","corners")):
+        st.info(t("격자 관련 오류: 먼저 원본 해상도와 분석 영역을 확인하세요. 형광이 적거나 없는 시료는 고정된 격자 템플릿 또는 알려진 행·열/모서리 좌표가 필요합니다. 신호 기준을 내려 결과를 억지로 맞추지 마세요.",
+                  "Grid issue: check the native resolution and ROI. Sparse/negative samples need a registered template or known corner geometry; do not tune signal thresholds to force a desired result."))
+    elif "calibration" in lower or "profile" in lower:
+        st.info(t("보정/프로필 오류: 표준 시료와 미지 시료에 동일한 분석 프로필을 적용하고, 현재 프로필 ID와 CSV의 ID가 일치하는지 확인하세요.","Calibration/profile issue: use the same locked profile for standards and unknowns, and check profile IDs."))
 
-            if circularity >= circularity_thresh and convexity >= convexity_thresh:
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cx = M["m10"] / M["m00"]
-                    cy = M["m01"] / M["m00"]
-                    _, radius = cv2.minEnclosingCircle(cnt)
-                    
-                    if margin < cx < (img_w - margin) and margin < cy < (img_h - margin):
-                        raw_positive_wells.append((cx, cy, radius))
+st.markdown(f'<div class="ws-brand">{html.escape(APP_NAME)}</div><div class="ws-sub">{html.escape(APP_SUBTITLE)}</div>',unsafe_allow_html=True)
+st.markdown(f'<div class="ws-tag">RESEARCH USE ONLY &nbsp; / &nbsp; v{VERSION}</div>',unsafe_allow_html=True)
 
-    # 2. 강력한 중복/노이즈 제거
-    if len(raw_positive_wells) > 10:
-        raw_positive_wells.sort(key=lambda x: x[2], reverse=True)
-        filtered_wells = []
-        for w in raw_positive_wells:
-            is_dup = False
-            for fw in filtered_wells:
-                if calculate_distance(w[:2], fw[:2]) < min_pitch * 0.8:
-                    is_dup = True
-                    break
-            if not is_dup:
-                filtered_wells.append(w)
-                
-        raw_positive_wells = filtered_wells
+with st.sidebar:
+    st.subheader(t("1. 이미지 입력","1. Image input"))
+    uploaded=st.file_uploader(t("Microwell 형광 이미지","Microwell fluorescence image"),type=["png","jpg","jpeg","tif","tiff"],key="image_upload")
+    demo=st.checkbox(t("합성 예제로 사용법 확인","Use synthetic demonstration"),value=False,key="demo_mode")
+    st.caption(t("원본 PNG 또는 8/16-bit 단일 TIFF를 권장합니다. 업로드는 현재 Streamlit 서버로 전송됩니다. 공개 GitHub에는 실험 이미지를 올리지 마세요.",
+                 "Prefer original PNG or single-plane 8/16-bit TIFF. Uploads go to the Streamlit server; do not commit private images to public GitHub."))
 
-    grid_img = image_rgb.copy()
-    result_img = image_rgb.copy()
-    
-    total_wells = 0
-    matched_pos_count = 0
-    matched_neg_count = 0
-    ratio = 0.0
-    is_gmo = False
-    cols = 0
-    rows = 0
+if uploaded is not None:
+    raw_bytes=uploaded.getvalue();source_kind="uploaded";source_name=uploaded.name
+elif demo:
+    if "synthetic_bytes" not in st.session_state:st.session_state.synthetic_bytes=synthetic_demo()
+    raw_bytes=st.session_state.synthetic_bytes;source_kind="synthetic";source_name="synthetic_demo.png"
+else:
+    st.markdown(t("### 이미지 한 장에서, 재현 가능한 분석 결과까지","### From one image to a reproducible analysis record"))
+    st.write(t("왼쪽에서 이미지를 올리고 ‘분석 실행’을 누르세요. 처음에는 자동 탐색으로 격자를 확인하고, 논문 분석에는 대조군으로 확인한 고정 임계값을 저장해 사용합니다.",
+               "Upload an image on the left and select Run analysis. Start with automatic exploration to inspect the grid, then use a control-checked fixed threshold for study measurements."))
+    c1,c2,c3=st.columns(3)
+    with c1:st.info(t("01  자동 격자 추정\n\n간격·기울기·완전한 측정 영역을 확인합니다.","01  Grid inference\n\nInspect spacing, orientation and measurable footprints."))
+    with c2:st.info(t("02  신호 분석\n\n원래 픽셀에서 배경 보정 신호를 측정합니다.","02  Signal measurement\n\nMeasure background-corrected signal in native pixels."))
+    with c3:st.info(t("03  논문용 내보내기\n\n이미지·CSV·설정·방법 기록을 함께 저장합니다.","03  Research export\n\nExport images, CSV, settings and method records together."))
+    st.warning(t("양성 well 비율 ≠ GMO 함량. 보정표가 없는 경우 GMO 함량이나 GMO/non-GMO 판정은 출력하지 않습니다.","Positive-well fraction is not GMO content. No content estimate or GMO/non-GMO claim is generated without calibration."))
+    st.stop()
 
-    if len(raw_positive_wells) > 10:
-        pts = np.array([w[:2] for w in raw_positive_wells])
-        radii = [w[2] for w in raw_positive_wells]
-        avg_radius = int(round(np.mean(radii)))
+input_hash=hashlib.sha256(raw_bytes).hexdigest()
+try:
+    if st.session_state.get("decoded_hash")!=input_hash:
+        st.session_state.decoded_frame=decode_image(raw_bytes)
+        st.session_state.decoded_hash=input_hash
+    decoded=st.session_state.decoded_frame
+except AnalysisError as exc:
+    show_expected_error(exc);st.stop()
+meta=decoded["metadata"];h,w=meta["height"],meta["width"]
 
-        # 3. KD-Tree를 이용한 진짜 간격(Pitch) 파악
-        tree = cKDTree(pts)
-        
-        distances, _ = tree.query(pts, k=min(6, len(pts)))
-        valid_pitches = []
-        for i in range(len(pts)):
-            for k in range(1, distances.shape[1]):
-                if distances[i, k] >= min_pitch * 0.8:
-                    valid_pitches.append(distances[i, k])
-                    break
-                    
-        rough_pitch = np.median(valid_pitches) if valid_pitches else min_pitch
-        
-        # ★ 핵심 추가: 웰 크기를 기반으로 한 "자동 안전 마진" 계산 (파라미터 불필요)
-        auto_margin = rough_pitch * 0.7
+with st.sidebar:
+    sample_id=st.text_input(t("시료 ID (결과 화면 표시)","Sample ID (display label)"),value="MW-"+input_hash[:6].upper(),max_chars=80,key="sample_"+input_hash[:10])
+    st.caption(f"{w} × {h} px · {meta['bit_depth']}-bit · {meta['color_mode']}")
+    st.subheader(t("2. 형광 판정 기준","2. Fluorescence threshold"))
+    mode=st.selectbox(t("분석 방식","Analysis mode"),["auto","fixed","profile"],
+        format_func=lambda x:{"auto":t("자동 제안 · 탐색용","Automatic proposal · exploratory"),
+                              "fixed":t("고정 임계값 · 대조군 확인 필요","Fixed threshold · controls required"),
+                              "profile":t("저장된 분석 프로필","Saved analysis profile")}[x],key="threshold_mode")
+    fixed=60.0
+    if mode=="fixed":
+        fixed=st.number_input(t("고정 임계값 (배경 보정 후 원래 강도 단위)","Fixed threshold (background-corrected native units)"),value=60.0,step=1.0,format="%.3f",key="fixed_value")
+        st.caption(t("이전 앱의 G 밝기 150과 같은 값이 아닙니다. 대조군·표준 시료로 새 측정법의 임계값을 확인하세요.","This is not equivalent to the old raw G-channel threshold. Check the new measurement definition with controls."))
+    profile_upload=None;profile_obj=None
+    if mode=="profile":
+        profile_upload=st.file_uploader(t("analysis_profile.json 불러오기","Load analysis_profile.json"),type=["json"],key="profile_upload")
+        if profile_upload is not None:
+            try:profile_obj=read_profile(profile_upload.getvalue(),decoded)
+            except AnalysisError as exc:show_expected_error(exc)
+    st.subheader(t("3. 선택 설정","3. Optional settings"))
+    advanced=st.checkbox(t("고급 설정 열기","Enable advanced settings"),value=False,key="advanced")
 
-        pairs = tree.query_pairs(r=rough_pitch * 1.5)
-        angles = []
-        for i, j in pairs:
-            dy, dx = pts[j][1] - pts[i][1], pts[j][0] - pts[i][0]
-            angle = np.degrees(np.arctan2(dy, dx))
-            a_mod = angle % 90
-            if a_mod > 45: a_mod -= 90
-            angles.append(a_mod)
-        grid_angle = np.median(angles) if angles else 0.0
-
-        right_vecs, down_vecs = [], []
-        for i, j in pairs:
-            dy, dx = pts[j][1] - pts[i][1], pts[j][0] - pts[i][0]
-            for v_dx, v_dy in [(dx, dy), (-dx, -dy)]:
-                a = np.degrees(np.arctan2(v_dy, v_dx))
-                r_a = (a - grid_angle + 360) % 360
-                if r_a > 180: r_a -= 360
-                if math.hypot(v_dx, v_dy) < rough_pitch * 0.5: continue
-                if -45 <= r_a <= 45: right_vecs.append((v_dx, v_dy))
-                elif 45 < r_a <= 135: down_vecs.append((v_dx, v_dy))
-
-        vec_right = np.median(right_vecs, axis=0) if right_vecs else (rough_pitch, 0)
-        vec_down = np.median(down_vecs, axis=0) if down_vecs else (0, rough_pitch)
-
-        min_x, max_x = np.min(pts[:, 0]), np.max(pts[:, 0])
-        min_y, max_y = np.min(pts[:, 1]), np.max(pts[:, 1])
-        bound_margin = rough_pitch * 5
-
-        _, start_idx = tree.query([img_w / 2, img_h / 2])
-        start_x, start_y = pts[start_idx]
-
-        visited = set([(0, 0)])
-        used_spots = set([start_idx])
-        grid_dict = {(0, 0): (start_x, start_y)}
-        queue = collections.deque([(0, 0, start_x, start_y)])
-
-        dirs = [(1, 0, vec_right[0], vec_right[1]), (-1, 0, -vec_right[0], -vec_right[1]),
-                (0, 1, vec_down[0], vec_down[1]), (0, -1, -vec_down[0], -vec_down[1])]
-
-        while queue:
-            c, r, cx, cy = queue.popleft()
-            for dc, dr, vx, vy in dirs:
-                nc, nr = c + dc, r + dr
-                if (nc, nr) in visited: continue
-                
-                ex, ey = cx + vx, cy + vy
-                
-                # ★ 변경: 0이 아니라 자동 안전 마진(auto_margin) 밖으로 나가면 즉시 컷
-                if ex < auto_margin or ex > img_w - auto_margin or ey < auto_margin or ey > img_h - auto_margin:
-                    continue
-
-                visited.add((nc, nr))
-                d, idx = tree.query([ex, ey])
-
-                if d < rough_pitch * 0.45:
-                    if idx not in used_spots:
-                        ax, ay = pts[idx]
-                        grid_dict[(nc, nr)] = (ax, ay)
-                        used_spots.add(idx)
-                        queue.append((nc, nr, ax, ay))
-                    else:
-                        grid_dict[(nc, nr)] = (ex, ey)
-                        queue.append((nc, nr, ex, ey))
-                else:
-                    grid_dict[(nc, nr)] = (ex, ey)
-                    queue.append((nc, nr, ex, ey))
-
-        min_c = min(c for c, r in grid_dict.keys())
-        max_c = max(c for c, r in grid_dict.keys())
-        min_r = min(r for c, r in grid_dict.keys())
-        max_r = max(r for c, r in grid_dict.keys())
-
-        for c in range(min_c, max_c + 1):
-            for r in range(min_r, max_r + 1):
-                if (c, r) not in grid_dict:
-                    best_k = min(grid_dict.keys(), key=lambda k: abs(c - k[0]) + abs(r - k[1]))
-                    kx, ky = grid_dict[best_k]
-                    dc, dr = c - best_k[0], r - best_k[1]
-                    ex = kx + dc * vec_right[0] + dr * vec_down[0]
-                    ey = ky + dc * vec_right[1] + dr * vec_down[1]
-                    
-                    # ★ 빈자리 채울 때도 자동 마진 확인
-                    if ex < auto_margin or ex > img_w - auto_margin or ey < auto_margin or ey > img_h - auto_margin:
-                        continue
-                    
-                    d, idx = tree.query([ex, ey])
-                    if d < rough_pitch * 0.45 and idx not in used_spots:
-                        ax, ay = pts[idx]
-                        grid_dict[(c, r)] = (ax, ay)
-                        used_spots.add(idx)
-                    else:
-                        grid_dict[(c, r)] = (ex, ey)
-
-        # ★ 3-2. 최종적으로 grid_dict 한 번 더 정리 및 행/열 재계산
-        final_grid_dict = {}
-        for (c, r), (px, py) in grid_dict.items():
-            if auto_margin <= px <= img_w - auto_margin and auto_margin <= py <= img_h - auto_margin:
-                final_grid_dict[(c, r)] = (px, py)
-                
-        grid_dict = final_grid_dict
-        
-        if grid_dict:
-            min_c = min(c for c, r in grid_dict.keys())
-            max_c = max(c for c, r in grid_dict.keys())
-            min_r = min(r for c, r in grid_dict.keys())
-            max_r = max(r for c, r in grid_dict.keys())
-            cols = max_c - min_c + 1
-            rows = max_r - min_r + 1
-            total_wells = len(grid_dict) # 정확하게 남은 웰 개수만 계산
-        else:
-            cols = rows = total_wells = 0
-
-        # 4. 신호 정밀 측정 및 판정
-        r_int = max(1, int(round(avg_radius * 0.5))) 
-        
-        for (c, r), (px, py) in grid_dict.items():
-            px, py = int(round(px)), int(round(py))
-            cv2.circle(grid_img, (px, py), avg_radius, (0, 255, 255), 1)
-            
-            y1, y2 = max(0, py - r_int), min(img_h, py + r_int)
-            x1, x2 = max(0, px - r_int), min(img_w, px + r_int)
-            roi_green = green_channel[y1:y2, x1:x2]
-            
-            if roi_green.size > 0:
-                intensity = np.mean(roi_green)
+cfg=Settings(threshold_mode="fixed" if mode in ("fixed","profile") else "auto",fixed_threshold=float(fixed))
+template_bytes=None;registered=False
+if advanced:
+    with st.sidebar:
+        with st.expander(t("촬영 조건·측정법","Acquisition / measurement"),expanded=False):
+            channel=st.selectbox(t("형광 채널","Signal channel"),["G","R","B"],key="channel")
+            acquisition=st.text_input(t("촬영·반응 프로토콜 ID","Acquisition / assay protocol ID"),value="LAMP-FITC-v1",key="acquisition")
+            st.caption(t("노출, 배율, gain, 반응 시간, DNA 투입/희석 조건을 같은 ID로 관리하세요. 앱이 이 조건을 자동 확인할 수는 없습니다.","Use the same ID for matching exposure, magnification, gain, reaction time and DNA input/dilution. The app cannot verify those conditions automatically."))
+            inner=st.number_input(t("신호 원 반지름 / pitch","Signal radius / pitch"),min_value=.08,max_value=.35,value=.22,step=.01,key="inner_ratio")
+            bg1=st.number_input(t("배경 안쪽 반지름 / pitch","Background inner radius / pitch"),min_value=.10,max_value=.47,value=.34,step=.01,key="bg1")
+            bg2=st.number_input(t("배경 바깥 반지름 / pitch","Background outer radius / pitch"),min_value=.15,max_value=.49,value=.46,step=.01,key="bg2")
+        cfg=replace(cfg,channel=channel,acquisition_id=acquisition,inner_ratio=float(inner),bg_inner_ratio=float(bg1),bg_outer_ratio=float(bg2))
+        with st.expander(t("격자·분석 영역","Grid / region of interest"),expanded=False):
+            geo=st.selectbox(t("격자 방식","Geometry method"),["auto","template","manual"],format_func=lambda x:{"auto":t("자동 추정","Automatic inference"),"template":t("정합된 격자 템플릿","Registered template"),"manual":t("알려진 행·열 + 네 모서리","Known rows/columns + corners")}[x],key="geometry_mode")
+            cfg=replace(cfg,geometry_mode=geo)
+            crop=st.checkbox(t("분석 영역 자르기","Limit analysis ROI"),value=False,key="use_roi")
+            if crop:
+                xr=st.slider(t("가로 범위 (pixel)","Horizontal range (pixel)"),0,w,(0,w),key="roi_x_"+input_hash[:8])
+                yr=st.slider(t("세로 범위 (pixel)","Vertical range (pixel)"),0,h,(0,h),key="roi_y_"+input_hash[:8])
+                cfg=replace(cfg,roi=(xr[0],yr[0],xr[1],yr[1]))
+            if geo=="auto":
+                override=st.checkbox(t("자동 격자 탐색값 직접 보정","Override automatic candidate settings"),value=False,key="geo_override")
+                if override:
+                    hint=st.number_input(t("예상 pitch (원래 pixel)","Expected pitch (native pixel)"),min_value=3.0,max_value=300.0,value=6.0,step=.1,key="pitch_hint")
+                    floor=st.number_input(t("격자 후보 최소 신호 (원래 단위)","Geometry candidate floor (native units)"),min_value=0.0,value=15.0,step=1.0,key="floor")
+                    cfg=replace(cfg,pitch_hint=float(hint),candidate_floor=float(floor))
+            elif geo=="template":
+                template=st.file_uploader(t("grid_template.json 불러오기","Load grid_template.json"),type=["json"],key="template_upload")
+                if template is not None:
+                    template_bytes=template.getvalue()
+                    template_key=hashlib.sha256(template_bytes).hexdigest()[:8]
+                    registered=st.checkbox(t("촬영 위치·배율·회전·좌표 정합이 같은 이미지입니다","I confirmed the same field of view, scale, orientation and pixel registration"),value=False,key="registered_"+input_hash[:8]+template_key)
             else:
-                intensity = 0
-                
-            is_pos = intensity >= signal_thresh
-            
-            if is_pos:
-                cv2.circle(result_img, (px, py), avg_radius, (255, 255, 0), 1)
-                matched_pos_count += 1
-            else:
-                cv2.circle(result_img, (px, py), avg_radius, (255, 0, 0), 1)
-                matched_neg_count += 1
+                nr=st.number_input(t("행 (위→아래)","Rows (top to bottom)"),2,200,60,key="rows")
+                nc=st.number_input(t("열 (왼쪽→오른쪽)","Columns (left to right)"),2,200,61,key="cols")
+                st.caption(t("칩 외곽이 아니라 네 귀퉁이 well의 중심 좌표입니다. 상하좌우 순서를 확인하세요.","Enter the CENTER of each corner well, not the outside edge of the chip."))
+                corners=[]
+                for key,name,default in [("tl",t("좌상","Top left"),(5.,5.)),("tr",t("우상","Top right"),(float(w-6),5.)),("br",t("우하","Bottom right"),(float(w-6),float(h-6))),("bl",t("좌하","Bottom left"),(5.,float(h-6)))]:
+                    c1,c2=st.columns(2)
+                    x=c1.number_input(name+" X",0.0,float(w-1),default[0],step=.1,key=key+"x_"+input_hash[:8])
+                    y=c2.number_input(name+" Y",0.0,float(h-1),default[1],step=.1,key=key+"y_"+input_hash[:8])
+                    corners.append((float(x),float(y)))
+                cfg=replace(cfg,manual_rows=int(nr),manual_cols=int(nc),manual_corners=tuple(corners))
+        with st.expander(t("특정 well 제외 · 사유 기록","Exclude selected wells / audit reason"),expanded=False):
+            ids=st.text_area(t("제외 ID: R001C001, R001C002 형식","Excluded IDs: R001C001, R001C002"),value="",key="exclude_ids")
+            reason=st.text_input(t("제외 사유 (기록됨)","Exclusion reason (recorded)"),value="",key="exclude_reason")
+            cfg=replace(cfg,excluded_ids=ids,exclusion_reason=reason)
+            st.caption(t("분류 결과를 원하는 값으로 맞추기 위한 제외는 피하세요. 제외 규칙은 표준·미지 시료에 일관되게 적용해야 합니다.","Do not exclude wells to force a desired result. Apply prespecified rules consistently to standards and unknowns."))
 
-        ratio = (matched_pos_count / total_wells * 100) if total_wells > 0 else 0
-        is_gmo = ratio >= gmo_criteria
+profile_ready=mode!="profile" or profile_obj is not None
+if profile_obj is not None:
+    cfg=replace(cfg,threshold_mode="fixed",fixed_threshold=float(profile_obj["threshold_native"]),
+                channel=profile_obj["channel"],acquisition_id=profile_obj["acquisition_id"],
+                inner_ratio=profile_obj["inner_ratio"],bg_inner_ratio=profile_obj["bg_inner_ratio"],bg_outer_ratio=profile_obj["bg_outer_ratio"])
+    with st.sidebar:st.success(t("신호 측정 설정은 불러온 프로필로 고정됩니다.","Photometry settings are locked to the loaded profile."))
+with st.sidebar:
+    run=st.button(t("분석 실행","Run analysis"),type="primary",width="stretch",disabled=not profile_ready,key="run_analysis")
+    paper=st.checkbox(t("논문용 결과 보기 (영문)","Publication panel view (English)"),value=False,key="paper_view")
+    st.caption(t("처음에는 기본 설정으로 실행하세요. 자동 분석 성공은 실험적 검증 완료를 뜻하지 않습니다.","Start with defaults. Successful software analysis is not experimental validation."))
 
-    return grid_img, result_img, total_wells, matched_pos_count, matched_neg_count, ratio, is_gmo, cols, rows
-
-# --- Streamlit UI 구성 ---
-st.set_page_config(layout="wide", page_title="Microwell 분석기 Pro")
-
-st.title("🦠 Microwell 형광 자동 분석기 (신호 정밀분석 Pro)")
-st.markdown("---")
-
-col1, col2 = st.columns([1.2, 2.5])
-
-with col1:
-    st.subheader("⚙️ 분석 설정")
-    
-    with st.expander("1️⃣ 판정 기준 및 밝기", expanded=True):
-        gmo_criteria = st.slider("GMO 판정 기준 (%)", 1, 100, 50)
-        
-        st.markdown("---")
-        signal_thresh = st.slider("✨ Positive 판정 밝기 기준 (Signal)", 0, 255, 40)
-        
-        st.markdown("---")
-        min_threshold = st.slider("격자 탐색 최소 밝기", 0, 255, 30)
-        max_threshold = st.slider("격자 탐색 최대 밝기", 0, 255, 255)
-
-    with st.expander("2️⃣ 스팟 형태 필터링 (격자용)", expanded=True):
-        min_pitch = st.number_input("최소 웰 간격 (Pitch - 픽셀)", min_value=5, max_value=200, value=20, step=1, help="웰 중심과 다음 웰 중심 사이의 최소 거리를 픽셀 단위로 입력하세요. 격자가 너무 촘촘하게(뻥튀기) 잡힐 때 이 값을 올리면 해결됩니다.")
-        
-        st.markdown("---")
-        min_area = st.number_input("최소 면적 (픽셀)", min_value=1, max_value=5000, value=5, step=5)
-        max_area = st.number_input("최대 면적 (픽셀)", min_value=10, max_value=50000, value=200, step=10)
-        circularity = st.slider("최소 원형도", 0.0, 1.0, 0.3, step=0.05)
-        convexity = st.slider("최소 볼록성", 0.0, 1.0, 1.0, step=0.05)
-
-    uploaded_file = st.file_uploader("✨ 형광 이미지를 업로드하세요", type=['png', 'jpg', 'jpeg'])
-
-with col2:
-    if uploaded_file is not None:
-        image_pil = Image.open(uploaded_file)
-        
-        with st.spinner("형광 신호를 정밀 측정 중입니다..."):
-            grid_img, result_img, total, pos, neg, ratio, is_gmo, cols, rows = analyze_microwells(
-                image_pil, min_threshold, max_threshold, min_area, max_area, circularity, convexity, gmo_criteria, signal_thresh, min_pitch
-            )
-            
-            tab1, tab2 = st.tabs(["📌 1. 왜곡 보정 가상 격자", "📊 2. 형광 신호 측정 결과"])
-            
-            with tab1:
-                st.subheader("가상 격자(Virtual Grid) 계산 확인")
-                col_a, col_b = st.columns(2)
-                col_a.metric("추정된 배열 형태", f"가로 {cols} x 세로 {rows} 줄")
-                col_b.metric("계산된 전체 Well 개수", f"{total:,} 개")
-                
-                if total > 0:
-                    st.image(grid_img, caption="청록색: 누적 오차 및 노이즈 중복 없이 추적된 정밀 가상 격자점", use_column_width=True)
-                else:
-                    st.warning("스팟이 충분히 검출되지 않았습니다. 격자 탐색 밝기나 면적 설정을 조절해주세요.")
-                    
-            with tab2:
-                st.subheader("Positive / Negative 최종 분류 결과")
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("전체 Well", f"{total:,} 개")
-                m2.metric("Positive (노란색)", f"{pos:,} 개")
-                m3.metric("Negative (빨간색)", f"{neg:,} 개")
-                m4.metric("Positive 비율", f"{ratio:.1f} %")
-                
-                if total > 0:
-                    if is_gmo:
-                        st.error(f"🚨 **판정 결과: GMO 입니다.** (기준: {gmo_criteria}%, 현재: {ratio:.1f}%)")
-                    else:
-                        st.success(f"✅ **판정 결과: Non-GMO 입니다.** (기준: {gmo_criteria}%, 현재: {ratio:.1f}%)")
-                    
-                    st.image(result_img, caption="노란색: 신호 강함(Positive), 빨간색: 신호 없음(Negative)", use_column_width=True)
-                else:
-                    st.warning("분석할 결과가 없습니다.")
+signature=object_hash({"input":input_hash,"settings":asdict(cfg),"template":hashlib.sha256(template_bytes or b'').hexdigest(),"source_kind":source_kind})
+if run:
+    st.session_state.pop("result_signature", None)
+    if cfg.geometry_mode=="template" and not registered:
+        st.warning(t("템플릿의 좌표 정합을 확인하고 확인란을 선택한 뒤 실행하세요.","Confirm template registration before analysis."))
     else:
-        st.info("👈 왼쪽 사이드바에서 이미지를 업로드하면 분석이 시작됩니다.")
+        try:
+            with st.spinner(t("격자 추정 및 원래 픽셀 신호 측정 중…","Fitting grid and measuring native-pixel signals…")):
+                result=analyze(raw_bytes,cfg,template_bytes,source_kind)
+            st.session_state["result"]=result;st.session_state["result_signature"]=signature
+            st.session_state.pop("bundle",None)
+        except AnalysisError as exc:show_expected_error(exc)
+        except Exception:
+            # Do not reveal server internals to public users.
+            traceback.print_exc()
+            st.error(t("예기치 않은 오류가 발생했습니다. Streamlit의 Manage app 로그를 확인하세요. 파일 내용·개인정보를 지운 오류 메시지만 공유하세요.","Unexpected error. Inspect Manage app logs; redact private information before sharing them."))
+
+if not profile_ready or st.session_state.get("result_signature")!=signature:
+    if "result" in st.session_state:
+        st.info(t("입력 또는 설정이 변경되었습니다. 이전 결과 대신 ‘분석 실행’으로 다시 계산하세요.","Input/settings changed. Run analysis again; stale results are not displayed."))
+    st.image(decoded["display_rgb"],caption=t("입력 미리보기 · 아직 분석 결과가 아닙니다","Input preview · not an analysis result"),width="stretch",output_format="PNG")
+    if mode=="profile" and not profile_ready:
+        st.warning(t("저장된 analysis_profile.json을 먼저 올려주세요.","Upload a valid saved analysis profile first."))
+    st.stop()
+
+result=st.session_state["result"];summary=result["summary"]
+if source_kind=="synthetic":st.warning(t("합성 예제입니다. 논문 실험 결과로 사용할 수 없습니다.","Synthetic example. Do not use as experimental evidence."))
+reviewed=st.checkbox(t("격자 전체와 확대 영역을 확인했고, measurable well의 분모가 적절한지 검토했습니다","I reviewed the full/zoomed grid and the measurable-well denominator"),value=False,key="reviewed_"+signature[:16])
+
+# Optional calibration is intentionally separate from basic signal analysis.
+with st.expander(t("GMO / 함량 보정 — 표준 시료 데이터를 확보한 뒤 사용","Content calibration — use after acquiring standard-sample data"),expanded=False):
+    st.write(t("양성 well 비율만으로 GMO 함량을 정하지 않습니다. 동일 프로필로 분석한 표준 시료의 보정 CSV가 있어야 아래 기능을 사용할 수 있습니다. 파일명에 적힌 농도는 읽어서 정답으로 사용하지 않습니다.",
+               "Positive fraction alone does not determine GMO content. Supply a calibration CSV measured with the same profile. Concentrations in filenames are never used as ground truth."))
+    cal_upload=st.file_uploader(t("보정 CSV","Calibration CSV"),type=["csv"],key="calibration_upload")
+    b1,b2,b3=st.columns([2,1,1])
+    basis=b1.selectbox(t("함량 단위의 근거","Quantity basis"),list(BASES),format_func=lambda x:{
+        "calibrant_equivalent":t("표준 시료 상당 함량 (%)","Calibrant-equivalent content (%)"),
+        "gm_mass_fraction":t("GM 질량분율 (%) · 이 기준으로 검증한 경우","GM mass fraction (%) · if validated"),
+        "target_reference_copy_ratio":t("타깃/참조 유전자 copy 비율 (%)","Target/reference copy ratio (%)")}[x],key="quantity_basis")
+    study=b2.number_input(t("연구상 분류 기준 (%)","Study threshold (%)"),0.0,100.0,3.0,step=.1,key="study_threshold")
+    band=b3.number_input(t("재검토 구간 ± (%p)","Review band ± (pp)"),0.0,10.0,.3,step=.1,key="review_band")
+    st.caption(t("±0.3%p는 사용자가 변경할 수 있는 연구 운영상 예시값이며, 신뢰구간이나 법적 기준이 아닙니다. 보정식의 측정불확도는 이 앱이 계산하지 않습니다.",
+                 "±0.3 pp is a configurable operational example, not a confidence interval or legal rule. This app does not calculate calibration uncertainty."))
+    confirm=st.checkbox(t("형광 임계값을 양성·음성 대조군으로 확인했고, 표준/미지 시료의 촬영·반응·DNA 투입/희석 조건과 프로필이 비교 가능하며, 보정과 독립 검증이 다름을 이해했습니다","I checked the fluorescence threshold against positive/negative controls, confirm comparable imaging, assay and DNA-input/dilution conditions, and understand that calibration is not independent validation"),value=False,key="calibration_confirm_"+signature[:12])
+    blank=pd.DataFrame(columns=CAL_COLUMNS)
+    st.download_button(t("빈 보정 CSV 양식","Blank calibration CSV"),csv_bytes(blank),file_name="calibration_template.csv",mime="text/csv",key="calibration_template_download")
+    known=st.number_input(t("현재 시료가 표준일 때: 알고 있는 함량 (%)","For a known standard: assigned content (%)"),0.0,100.0,0.0,step=.1,key="known_content")
+    standard_row=pd.DataFrame([{"sample_id":sample_id,"positive_fraction_pct":summary["positive_fraction_pct"],"known_content_pct":known,"profile_id":result["profile"]["profile_id"],"quantity_basis":basis}])
+    st.download_button(t("현재 결과를 표준 1행 CSV로 저장","Save current result as one calibrant row"),csv_bytes(standard_row),file_name=safe_id(sample_id)+"_calibrant_row.csv",mime="text/csv",disabled=summary["threshold_mode"]!="fixed" or source_kind=="synthetic",key="save_cal_row")
+    st.caption(t("표준 여러 개의 CSV에서 데이터 행을 모아 하나의 파일로 합칩니다. 헤더는 맨 위 한 번만 둡니다. 미지 시료에 아는 함량을 임의 입력해 보정표를 만들지 마세요.","Combine real standard rows into one CSV with a single header. Do not assign guessed content to unknown samples."))
+
+# Re-evaluate or reset calibration on every rerun: no stale model/result after upload removal.
+result["summary"]["calibration"]={"status":"not_loaded","estimated_content_pct":None,"decision":"Not evaluated"}
+if cal_upload is not None:
+    try:
+        result["summary"]["calibration"]=calibrate(result,cal_upload.getvalue(),basis,float(study),float(band),confirm)
+    except AnalysisError as exc:
+        st.warning(t("함량 추정 보류: ","Content estimation withheld: ")+str(exc))
+summary=result["summary"];cal=summary["calibration"]
+
+if paper:
+    st.image(panel_svg(result,sample_id,reviewed).decode("utf-8"),width="stretch")
+    st.caption(t("이 패널은 실제 계산 결과로 생성됩니다. 아래 SVG/HTML 내보내기를 사용하면 브라우저 사이드바 없이 저장할 수 있습니다.","This panel is generated from actual computed measurements. SVG/HTML exports exclude browser sidebars."))
+else:
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric(t("측정 가능 well","Measurable wells"),f"{summary['valid_wells']:,}")
+    c2.metric(t("임계값 이상 well","Threshold-positive"),f"{summary['positive_wells']:,}")
+    c3.metric(t("양성 well 비율","Positive fraction"),f"{summary['positive_fraction_pct']:.2f}%")
+    est=cal.get("estimated_content_pct")
+    c4.metric(t("추정 함량","Estimated content"),f"{est:.2f}%" if est is not None else t("보정 전","Not calibrated"))
+    status={"Not evaluated":t("함량 미판정 · 보정 데이터 필요","Content not evaluated · calibration required"),
+            "Outside calibration range":t("보정 범위 밖 · 외삽하지 않음","Outside calibration range · no extrapolation"),
+            "Review near study threshold":t("분류 기준 근처 · 재검토 필요","Near study threshold · review required"),
+            "At/above study threshold":t("연구상 기준 이상","At/above study threshold"),
+            "Below study threshold":t("연구상 기준 미만","Below study threshold")}[cal["decision"]]
+    st.info(status)
+    if est is not None:st.caption(t("단위 근거: ","Quantity basis: ")+cal["quantity_basis"]+t(". 기준 미만을 ‘GMO 불검출’ 또는 non-GMO 인증으로 해석하지 않습니다.",". Below threshold is not non-detection or non-GMO certification."))
+    tabs=st.tabs([t("결과 이미지","Result image"),t("격자 확인","Grid review"),t("신호·품질 확인","Signal / QC"),t("well별 데이터","Per-well data")])
+    imgs=overlays(result)
+    with tabs[0]:
+        c1,c2=st.columns(2)
+        with c1:
+            st.markdown(t("#### 입력 이미지","#### Input image"));st.image(imgs["raw"],width="stretch",output_format="PNG")
+        with c2:
+            st.markdown(t("#### 형광 분류","#### Fluorescence classification"));st.image(imgs["classification"],width="stretch",output_format="PNG")
+        st.caption(t("노란 원: 임계값 이상 · 빨간 ×: 임계값 미만 · 회색 □: 제외. 확대는 표시용이며 원래 해상도를 증가시키지 않습니다.","Yellow circle: above threshold; red x: below threshold; grey square: excluded. Display enlargement adds no native resolution."))
+    with tabs[1]:
+        g=summary["geometry"]
+        st.write(t("**추정/지정 격자:** ","**Inferred/defined lattice:** ")+f"{g['columns']} columns × {g['rows']} rows · pitch X {g['pitch_x_px']:.3f} px / Y {g['pitch_y_px']:.3f} px")
+        st.caption(t("행×열은 격자 범위이고, 실제 분모는 완전한 측정 영역이 남은 well입니다. FL 영상만으로 충전 여부까지 확인한 값은 아닙니다.","Rows × columns describes the lattice extent. The denominator includes complete measurable footprints; filling is not established from fluorescence alone."))
+        st.image(imgs["grid"],width="stretch",output_format="PNG")
+        with st.expander(t("원래 픽셀의 확대 영역 확인","Inspect a zoomed native-pixel region"),expanded=False):
+            zx=st.slider("Center X (px)",0,w-1,w//2,key="zoomx_"+input_hash[:8])
+            zy=st.slider("Center Y (px)",0,h-1,h//2,key="zoomy_"+input_hash[:8])
+            radius=max(12,int(g['pitch_px']*5));x0=max(0,zx-radius);x1=min(w,zx+radius);y0=max(0,zy-radius);y1=min(h,zy+radius)
+            sx=imgs['grid'].shape[1]/w;sy=imgs['grid'].shape[0]/h
+            patch=imgs['grid'][round(y0*sy):round(y1*sy),round(x0*sx):round(x1*sx)]
+            st.image(patch,caption=f"Native coordinates X {x0}..{x1}; Y {y0}..{y1}",width="stretch",output_format="PNG")
+    with tabs[2]:
+        st.image(histogram_bytes(result),width="stretch")
+        st.image(signal_plot_bytes(result),width="stretch")
+        if summary["threshold_mode"]=="auto":st.warning(t("자동 분리는 밝기 분포를 나눈 탐색 결과입니다. 음성/양성 대조군 없이 이 분리를 생물학적 양성·음성으로 확정할 수 없습니다.","The automatic split partitions intensity values. Without controls it is not a validated biological positive/negative decision."))
+        st.dataframe(pd.DataFrame(summary["qc_flags"]),hide_index=True,width="stretch")
+        st.caption(t("QC 주의 기준은 이 소프트웨어의 점검 기준이며 실험적으로 확립한 assay 합격 기준이 아닙니다.","QC cautions are software checks, not experimentally established assay acceptance criteria."))
+        cal_plot=calibration_plot_bytes(result)
+        if cal_plot:st.image(cal_plot,width="stretch")
+    with tabs[3]:
+        st.dataframe(result["table"],hide_index=True,width="stretch")
+        st.caption(t("좌표는 0부터 시작하는 원래 픽셀 좌표이고, row/column은 1부터 시작하는 격자 인덱스입니다.","Coordinates are zero-based native pixel coordinates; row/column IDs are one-based lattice indices."))
+
+st.divider()
+st.subheader(t("논문·기록용 내보내기","Publication / audit exports"))
+st.caption(t("SVG는 벡터 글자와 실제 이미지가 들어 있는 편집용 패널입니다. PNG 확대나 300 dpi 표기만으로 부족한 원본 해상도가 복구되지는 않습니다.","SVG contains vector labels and actual raster evidence. Enlargement or a 300-dpi tag cannot restore missing source resolution."))
+a,b,c=st.columns(3)
+with a:st.download_button(t("논문용 패널 SVG","Publication panel SVG"),panel_svg(result,sample_id,reviewed),file_name=safe_id(sample_id)+"_panel.svg",mime="image/svg+xml",width="stretch",key="download_panel")
+with b:st.download_button(t("결과 보고서 HTML","Analysis report HTML"),report_html(result,sample_id,reviewed),file_name=safe_id(sample_id)+"_report.html",mime="text/html",width="stretch",key="download_report")
+with c:st.download_button(t("well별 수치 CSV","Per-well CSV"),csv_bytes(result["table"]),file_name=safe_id(sample_id)+"_per_well.csv",mime="text/csv",width="stretch",key="download_csv")
+a,b,c=st.columns(3)
+with a:st.download_button(t("신호 분석 프로필 JSON","Analysis profile JSON"),json_bytes(result["profile"]),file_name="analysis_profile.json",mime="application/json",width="stretch",key="download_profile")
+with b:st.download_button(t("격자 템플릿 JSON","Geometry template JSON"),export_template(result),file_name="grid_template.json",mime="application/json",width="stretch",key="download_template")
+with c:st.download_button(t("설정·품질 기록 JSON","Settings / QC record JSON"),json_bytes(completed_summary(result,sample_id,reviewed)),file_name=safe_id(sample_id)+"_summary.json",mime="application/json",width="stretch",key="download_summary")
+st.caption(t("신호 프로필: 측정법·임계값을 재사용합니다. 격자 템플릿: 같은 촬영 좌표의 위치만 재사용하며, 새 이미지와 정합 확인이 필요합니다. 두 파일은 용도가 다릅니다.","Analysis profile reuses photometry and threshold. Geometry template reuses pixel positions and requires registration. These files have different purposes."))
+
+bundle_key=object_hash({"analysis":signature,"sample_id":sample_id,"reviewed":reviewed,"calibration":summary["calibration"]})
+if st.button(t("전체 결과 ZIP 준비","Prepare complete result ZIP"),key="prepare_bundle"):
+    with st.spinner(t("내보내기 파일 생성 중…","Preparing export files…")):
+        st.session_state["bundle"]=(bundle_key,export_bundle(result,sample_id,reviewed,raw_bytes))
+if st.session_state.get("bundle",(None,))[0]==bundle_key:
+    st.download_button(t("전체 결과 ZIP 저장","Download complete result ZIP"),st.session_state["bundle"][1],file_name=safe_id(sample_id)+"_analysis.zip",mime="application/zip",type="primary",key="download_bundle")
+with st.expander(t("분석 방법 문장 · 실험 조건을 확인하고 원고에 반영","Method paragraph · verify before using in a manuscript"),expanded=False):
+    st.write(method_text(result,sample_id,reviewed))
+    st.download_button(t("방법 기록 TXT","Methods TXT"),method_text(result,sample_id,reviewed),file_name="methods.txt",key="methods_download")
+st.caption(t("자동 계산 완료 ≠ 분석법 검증 완료. 대조군, 독립 반복 시료, 수동/참조법 비교가 별도로 필요합니다.","Computation complete does not mean method validated. Controls, independent replicates and reference/manual comparisons remain necessary."))
