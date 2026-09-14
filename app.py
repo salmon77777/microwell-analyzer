@@ -10,10 +10,12 @@ import html
 import io
 import json
 import traceback
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from wellscope_core import (
     APP_NAME, APP_SUBTITLE, VERSION, AnalysisError, Settings, BASES, CAL_COLUMNS, analyze, calibrate,
@@ -26,6 +28,19 @@ from wellscope_report import (
 
 from wellscope_batch import read_model, prediction_settings, predict, FEATURES, feature_values
 from wellscope_standards_ui import render_standards
+
+DEFAULT_SCREENING_MODEL_PATH = (
+    Path(__file__).resolve().parent / "models" / "screening_model_DEFAULT.json"
+)
+
+def load_builtin_screening_model():
+    if not DEFAULT_SCREENING_MODEL_PATH.exists():
+        return None, None
+    try:
+        model = read_model(DEFAULT_SCREENING_MODEL_PATH.read_bytes())
+        return model, None
+    except Exception as exc:
+        return None, str(exc)
 
 st.set_page_config(page_title=APP_NAME, page_icon="🔬", layout="wide", initial_sidebar_state="expanded")
 st.markdown('''<style>
@@ -121,15 +136,51 @@ with st.sidebar:
             except AnalysisError as exc:show_expected_error(exc)
     screen_model=None
     if mode=="model":
-        model_upload=st.file_uploader(t("screening_model.json 불러오기","Load screening_model.json"),type=["json"],key="screening_model_upload")
-        if model_upload is not None:
-            try:screen_model=read_model(model_upload.getvalue())
-            except AnalysisError as exc:st.error(str(exc))
-        else:screen_model=st.session_state.get("active_screening_model")
-        if screen_model is None:
-            st.info(t("표준 일괄 분석에서 저장한 모델을 올리거나, 제공된 탐색용 모델을 불러오세요.","Load the exported model or the supplied development-only model."))
+        builtin_model,builtin_error=load_builtin_screening_model()
+        source_options=["builtin","upload"] if builtin_model is not None else ["upload"]
+        model_source=st.radio(
+            t("선별 모델 소스","Screening model source"),
+            source_options,
+            index=0,
+            format_func=lambda x:{
+                "builtin":t("내장 연구 선별 모델 · 권장","Built-in study screening model · recommended"),
+                "upload":t("다른 screening_model.json 불러오기","Load another screening_model.json")
+            }[x],
+            key="screening_model_source"
+        )
+        if builtin_error:
+            st.warning(t("내장 모델을 읽을 수 없습니다: ","Unable to read built-in model: ")+builtin_error)
+
+        if model_source=="builtin":
+            screen_model=builtin_model
         else:
+            model_upload=st.file_uploader(
+                t("screening_model.json 불러오기","Load screening_model.json"),
+                type=["json"],
+                key="screening_model_upload"
+            )
+            if model_upload is not None:
+                try:
+                    screen_model=read_model(model_upload.getvalue())
+                    st.session_state["active_screening_model"]=screen_model
+                except AnalysisError as exc:
+                    st.error(str(exc))
+            else:
+                screen_model=st.session_state.get("active_screening_model")
+
+        if screen_model is None:
+            st.info(t(
+                "사용 가능한 선별 모델이 없습니다. 표준 일괄 분석에서 저장한 모델을 불러오세요.",
+                "No screening model is available. Load a model exported from standard-series analysis."
+            ))
+        else:
+            st.session_state["active_screening_model"]=screen_model
             st.success(t("연구 선별 모델을 불러왔습니다.","Study screening model loaded."))
+            if model_source=="builtin":
+                st.caption(t(
+                    "내장 모델은 현재 개발용 모델입니다. 논문 최종 분석 전에는 최종 표준 데이터로 다시 생성한 모델로 교체하세요.",
+                    "The built-in model is currently a development model. Replace it with the final locked model before manuscript analysis."
+                ))
             st.caption(
                 t("모델 ID: ","Model ID: ")+screen_model["model_id"]+
                 f"\nTw = {screen_model['well_rule']['threshold_native']:.4g} | "
@@ -307,7 +358,18 @@ else:
 summary=result["summary"];cal=summary["calibration"]
 
 if paper:
-    st.image(panel_svg(result,sample_id,reviewed).decode("utf-8"),width="stretch")
+    svg_text=panel_svg(result,sample_id,reviewed).decode("utf-8")
+    components.html(
+        """<html><head><style>
+        html,body{margin:0;padding:0;background:white;overflow:hidden}
+        .wrap{width:100%;background:white}
+        .wrap svg{display:block;width:100% !important;height:auto !important}
+        </style></head><body><div class="wrap">"""
+        +svg_text+
+        """</div></body></html>""",
+        height=760,
+        scrolling=False
+    )
     st.caption(t("이 패널은 실제 계산 결과로 생성됩니다. 아래 SVG/HTML 내보내기를 사용하면 브라우저 사이드바 없이 저장할 수 있습니다.","This panel is generated from actual computed measurements. SVG/HTML exports exclude browser sidebars."))
 else:
     c1,c2,c3,c4=st.columns(4)
