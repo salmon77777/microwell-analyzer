@@ -128,7 +128,14 @@ with st.sidebar:
         else:screen_model=st.session_state.get("active_screening_model")
         if screen_model is None:
             st.info(t("표준 일괄 분석에서 저장한 모델을 올리거나, 제공된 탐색용 모델을 불러오세요.","Load the exported model or the supplied development-only model."))
-        else:st.caption(t("모델 ID: ","Model ID: ")+screen_model["model_id"])
+        else:
+            st.success(t("연구 선별 모델을 불러왔습니다.","Study screening model loaded."))
+            st.caption(
+                t("모델 ID: ","Model ID: ")+screen_model["model_id"]+
+                f"\nTw = {screen_model['well_rule']['threshold_native']:.4g} | "
+                f"Ts = {screen_model['sample_rule']['cutoff']:.4g}% | "
+                f"study boundary = {screen_model['study_threshold_pct']:g}%"
+            )
     st.subheader(t("3. 선택 설정","3. Optional settings"))
     advanced=st.checkbox(t("고급 설정 열기","Enable advanced settings"),value=False,key="advanced")
 
@@ -258,17 +265,45 @@ if screen_model is None:
             st.warning(t("함량 추정 보류: ","Content estimation withheld: ")+str(exc))
 else:
     result["summary"]["calibration"]={"status":"not_loaded","estimated_content_pct":None,"decision":"Not evaluated"}
-    confirm_screen=st.checkbox(t("격자와 표준/현재 시료의 촬영·반응·DNA 투입 조건이 비교 가능함을 확인했습니다",
-        "I confirm grid review and comparable acquisition, assay and DNA-input conditions"),value=False,
-        key="screen_confirm_"+signature[:10]+screen_model["model_id"])
+    st.markdown("### "+t("연구 선별 판정","Study screening classification"))
+    st.info(
+        t(
+            f"모델이 준비되었습니다. 개별 well 기준 Tw={screen_model['well_rule']['threshold_native']:.4g}, "
+            f"시료 점수 기준 Ts={screen_model['sample_rule']['cutoff']:.4g}%, "
+            f"연구 혼합비 경계={screen_model['study_threshold_pct']:g}% 입니다. "
+            "아래 두 확인이 완료되어야 최종 시료 판정을 적용합니다.",
+            f"Model ready. Well cutoff Tw={screen_model['well_rule']['threshold_native']:.4g}, "
+            f"sample-score cutoff Ts={screen_model['sample_rule']['cutoff']:.4g}%, "
+            f"study mixture boundary={screen_model['study_threshold_pct']:g}%. "
+            "Complete both confirmations below to apply the sample-level classification."
+        )
+    )
+    comparable=st.checkbox(
+        t(
+            "표준과 현재 시료의 촬영·반응·DNA 투입/희석 조건이 비교 가능함을 확인했습니다",
+            "I confirm comparable acquisition, assay, DNA-input and dilution conditions"
+        ),
+        value=False,
+        key="screen_conditions_"+signature[:10]+screen_model["model_id"]
+    )
+    if not reviewed or not comparable:
+        st.warning(
+            t(
+                "선별 모델은 불러왔지만 아직 시료 판정은 적용되지 않았습니다. "
+                "위의 격자 검토와 이 조건 확인을 모두 선택하세요.",
+                "The screening model is loaded, but sample classification has not yet been applied. "
+                "Complete both grid review and condition confirmation."
+            )
+        )
     try:
-        if confirm_screen:
+        if reviewed and comparable:
             screen=predict(result,screen_model,confirmed=True)
             result["summary"]["screening"]=screen
             result["summary"]["calibration"]={"status":screen["numeric_status"],
                 "estimated_content_pct":screen["estimated_content_pct"],"decision":"Not evaluated",
                 "quantity_basis":screen["quantity_basis"],"study_threshold_pct":screen["study_threshold_pct"]}
-    except AnalysisError as exc:st.warning(str(exc))
+    except AnalysisError as exc:
+        st.warning(str(exc))
 summary=result["summary"];cal=summary["calibration"]
 
 if paper:
@@ -280,7 +315,16 @@ else:
     c2.metric(t("임계값 이상 well","Threshold-positive"),f"{summary['positive_wells']:,}")
     c3.metric(t("양성 well 비율","Positive fraction"),f"{summary['positive_fraction_pct']:.2f}%")
     est=cal.get("estimated_content_pct")
-    c4.metric(t("추정 GMO 혼합비","Estimated GMO mixture"),f"{est:.2f}%" if est is not None else t("정량 보류","Not quantified"))
+    if screen:
+        if screen["decision"]=="At/above study threshold":
+            class_value=t("≥3% 분류","≥3% class").replace("3%",f"{screen['study_threshold_pct']:g}%")
+        elif screen["decision"]=="Below study threshold":
+            class_value=t("<3% 분류","<3% class").replace("3%",f"{screen['study_threshold_pct']:g}%")
+        else:
+            class_value=screen["decision"]
+        c4.metric(t("시료 분류","Sample classification"),class_value)
+    else:
+        c4.metric(t("추정 GMO 혼합비","Estimated GMO mixture"),f"{est:.2f}%" if est is not None else t("정량 보류","Not quantified"))
     status={"Not evaluated":t("함량 미판정 · 보정 데이터 필요","Content not evaluated · calibration required"),
             "Outside calibration range":t("보정 범위 밖 · 외삽하지 않음","Outside calibration range · no extrapolation"),
             "Review near study threshold":t("분류 기준 근처 · 재검토 필요","Near study threshold · review required"),
@@ -295,7 +339,12 @@ else:
         st.caption(f"Sample score {screen['score']:.5f} | Locked sample cutoff {screen['sample_score_cutoff']:.5f} | Well cutoff {screen['well_threshold_native']:.5f}")
         if screen["training_image_match"]:st.warning(t("모델 개발에 사용한 동일 이미지입니다. 이 결과는 학습 이미지 재분석이며 독립 검증이 아닙니다.","This image trained the model. This is training-image reanalysis, not independent validation."))
         else:st.caption(t("새 이미지에 대한 미검증 예측입니다. 모델은 아직 독립 검증 전입니다.","Unvalidated prediction on a new image. The model has not been independently validated."))
-        if screen["numeric_status"]!="ready":st.caption(t("수치 정량 보류: ","Numerical calibration withheld: ")+", ".join(screen["numeric_withheld_reasons"]))
+        if screen["numeric_status"]!="ready":
+            st.caption(
+                t("정확한 GMO 혼합비 수치 정량은 보류되었습니다. 선별 분류와 수치 정량은 서로 다른 결과입니다. 사유: ",
+                  "Exact numerical GMO-mixture estimation is withheld. Screening classification and numerical quantification are different outputs. Reasons: ")
+                +", ".join(screen["numeric_withheld_reasons"])
+            )
     else:st.info(status)
     if est is not None:st.caption(t("단위 근거: ","Quantity basis: ")+cal["quantity_basis"]+t(". 기준 미만을 ‘GMO 불검출’ 또는 non-GMO 인증으로 해석하지 않습니다.",". Below threshold is not non-detection or non-GMO certification."))
     tabs=st.tabs([t("결과 이미지","Result image"),t("격자 확인","Grid review"),t("신호·품질 확인","Signal / QC"),t("well별 데이터","Per-well data")])

@@ -166,7 +166,10 @@ def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
     title=esc(sample_id[:65]);cal=s["calibration"];est=cal.get("estimated_content_pct")
     content=f"{est:.2f}%" if est is not None else "Not quantified"
     decision=decision_text(result)
-    badge="SYNTHETIC DEMONSTRATION" if s["source_kind"]=="synthetic" else ("FIXED THRESHOLD" if s["threshold_mode"]=="fixed" else "EXPLORATORY ANALYSIS")
+    screen=s.get("screening")
+    badge=("SYNTHETIC DEMONSTRATION" if s["source_kind"]=="synthetic" else
+           ("LOCKED SCREENING MODEL" if screen else
+            ("FIXED THRESHOLD" if s["threshold_mode"]=="fixed" else "EXPLORATORY ANALYSIS")))
     svg=[f'<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1140" viewBox="0 0 1800 1140">',
          '<rect width="1800" height="1140" fill="white"/>',
          '<g font-family="Arial, Helvetica, sans-serif" fill="#172d43">',
@@ -183,8 +186,17 @@ def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
         svg.append(f'<image x="{x}" y="180" width="554" height="548" preserveAspectRatio="xMidYMid meet" href="{uri}"/>')
         legend=[f"Native input: {s['image']['width']} x {s['image']['height']} px", "Cyan +: measured; grey square: excluded", "Yellow circle: positive; red x: negative"][i]
         svg.append(f'<text x="{x}" y="759" font-size="17" fill="#617184">{esc(legend)}</text>')
+    if screen:
+        if screen["decision"]=="At/above study threshold":
+            fourth=("Sample classification",f">={screen['study_threshold_pct']:g}% class")
+        elif screen["decision"]=="Below study threshold":
+            fourth=("Sample classification",f"<{screen['study_threshold_pct']:g}% class")
+        else:
+            fourth=("Sample classification",screen["decision"])
+    else:
+        fourth=("Estimated mixture",content)
     labels=[("Measurable wells",f"{s['valid_wells']:,}"),("Threshold-positive",f"{s['positive_wells']:,}"),
-            ("Positive fraction",f"{s['positive_fraction_pct']:.2f}%"),("Estimated mixture",content)]
+            ("Positive fraction",f"{s['positive_fraction_pct']:.2f}%"),fourth]
     for i,(labeltext,value) in enumerate(labels):
         x=45+i*435
         svg.append(f'<rect x="{x}" y="799" width="405" height="108" rx="9" fill="#f4f7f9"/>')
@@ -213,16 +225,27 @@ def panel_svg(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
 def report_html(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
     esc=html.escape;s=result["summary"];imgs=overlays(result);cal=s["calibration"]
     est=cal.get("estimated_content_pct");content=f"{est:.2f}%" if est is not None else "Not quantified"
-    state="Synthetic demonstration" if s["source_kind"]=="synthetic" else ("Fixed-threshold analysis" if s["threshold_mode"]=="fixed" else "Exploratory analysis")
+    screen=s.get("screening")
+    state=("Synthetic demonstration" if s["source_kind"]=="synthetic" else
+           ("Locked screening model" if screen else
+            ("Fixed-threshold analysis" if s["threshold_mode"]=="fixed" else "Exploratory analysis")))
+    if screen:
+        if screen["decision"]=="At/above study threshold":
+            fourth=("Sample classification",f">={screen['study_threshold_pct']:g}% class")
+        elif screen["decision"]=="Below study threshold":
+            fourth=("Sample classification",f"<{screen['study_threshold_pct']:g}% class")
+        else:
+            fourth=("Sample classification",screen["decision"])
+    else:
+        fourth=("Estimated mixture",content)
     metrics=[("Measurable wells",f"{s['valid_wells']:,}"),("Threshold-positive wells",f"{s['positive_wells']:,}"),
-             ("Positive-well fraction",f"{s['positive_fraction_pct']:.2f}%"),("Estimated mixture",content)]
+             ("Positive-well fraction",f"{s['positive_fraction_pct']:.2f}%"),fourth]
     metric_html=''.join(f'<div class="metric"><span>{a}</span><strong>{b}</strong></div>' for a,b in metrics)
     cards=''.join(f'<section class="imagecard"><h2>{heading}</h2><img src="{_data_uri(png_bytes(imgs[key]))}"><p>{note}</p></section>' for key,heading,note in [
         ("raw","A / Input image",f"{s['image']['width']} x {s['image']['height']} native pixels; display enlarged only."),
         ("grid","B / Fitted grid","Cyan +: measurable positions; grey square: excluded."),
         ("classification","C / Well classification","Yellow circle: threshold-positive; red x: negative; grey square: excluded.")])
     flags=''.join(f'<li><b>{esc(q["code"])}</b> — {esc(q["message"])}</li>' for q in s['qc_flags'])
-    screen=s.get("screening")
     screening_note=""
     if screen:
         evidence="Training-image reanalysis; not independent validation" if screen["training_image_match"] else "New-image prediction; model not independently validated"
@@ -233,7 +256,10 @@ def report_html(result: dict, sample_id: str, reviewed: bool=False) -> bytes:
 *{{box-sizing:border-box}}body{{font-family:Arial,Helvetica,sans-serif;margin:0;background:#eef3f6;color:#182f45}}main{{max-width:1460px;margin:28px auto;background:white;padding:36px 42px;border-radius:16px}}header{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #dce5ea;padding-bottom:24px}}h1{{font-size:32px;margin:0;letter-spacing:-.7px}}.sub{{color:#637589;margin:8px 0 0}}.meta{{text-align:right;font-size:14px;line-height:1.8}}.badge{{color:#276473;background:#edf7f8;border-radius:20px;padding:7px 14px;display:inline-block;font-size:13px}}.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:26px 0}}.metric{{padding:20px;background:#f5f8fa;border:1px solid #e0e8ed;border-radius:10px}}.metric span{{font-size:13px;color:#607589;display:block}}.metric strong{{display:block;font-size:29px;margin-top:10px;letter-spacing:-.5px}}.images{{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}}h2{{font-size:18px}}.imagecard img{{width:100%;aspect-ratio:1;object-fit:contain;background:#05090b;border-radius:6px}}.imagecard p{{font-size:12px;color:#637589;line-height:1.5;min-height:36px}}.decision{{border:1px solid #dfe7ec;background:#f9fbfc;border-left:4px solid #487f8e;border-radius:8px;padding:16px 20px;margin:22px 0;line-height:1.7}}.decision strong{{font-size:20px}}.small{{font-size:12px;color:#637589;line-height:1.6}}.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:24px}}.chart{{width:100%}}li{{font-size:13px;margin:8px 0;line-height:1.5}}details{{margin-top:18px;border-top:1px solid #dfe7ec;padding-top:16px}}summary{{cursor:pointer}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f8fa;padding:18px;font-size:12px}}.method{{line-height:1.8;font-size:14px}}@media(max-width:800px){{main{{padding:20px}}.metrics,.images,.grid2{{grid-template-columns:1fr}}header{{display:block}}.meta{{text-align:left;margin-top:15px}}}}@media print{{body{{background:white}}main{{margin:0;padding:10px;max-width:none}}details{{break-inside:avoid}}.images,.metrics{{break-inside:avoid}}}}
 </style><main><header><div><h1>{esc(APP_NAME)}</h1><p class="sub">{esc(APP_SUBTITLE)}</p></div><div class="meta"><div class="badge">{esc(state)}</div><br>Sample: <b>{esc(sample_id)}</b><br>Profile: {s['profile_id']} &nbsp; / &nbsp; v{VERSION}</div></header>
 <div class="metrics">{metric_html}</div><div class="images">{cards}</div>
-<div class="decision"><strong>{esc(decision_text(result))}</strong><br>Positive-well fraction and GMO content are different quantities. A below-threshold result is not a non-GMO certification.</div>
+<div class="decision"><strong>{esc(decision_text(result))}</strong><br>
+Sample score and assigned GMO mixture are different quantities.
+Numerical GMO-mixture estimate: {esc(content)}.
+A below-threshold result is not a non-GMO certification.</div>
 <p class="small">Native threshold: {s['threshold_native']:.4g} | Negative wells: {s['negative_wells']:,} | Excluded positions: {s['excluded_wells']:,} | Operator grid review: {'recorded' if reviewed else 'not recorded'}<br>Software geometric checks are not evidence of filling, amplification validity or analytical accuracy.</p>
 {screening_note}<div class="grid2"><section><h2>Signal distribution</h2><img class="chart" src="{_data_uri(histogram_bytes(result))}"></section><section><h2>Quality-control notes</h2><ul>{flags}</ul></section></div>
 
