@@ -74,6 +74,9 @@ def show_expected_error(exc: Exception) -> None:
 
 st.markdown(f'<div class="ws-brand">{html.escape(APP_NAME)}</div><div class="ws-sub">{html.escape(APP_SUBTITLE)}</div>',unsafe_allow_html=True)
 st.markdown(f'<div class="ws-tag">RESEARCH USE ONLY &nbsp; / &nbsp; v{VERSION}</div>',unsafe_allow_html=True)
+if VERSION.startswith('1.2'):
+    st.caption(t('v1.2: 해상도 변화에 대응하는 scale-aware 자동 격자 추정을 사용합니다. v1.1 선별 모델은 재사용하지 말고 v1.2 표준 분석에서 다시 생성하세요.',
+                 'v1.2 uses scale-aware automatic grid localization. Rebuild screening models with the v1.2 standard-series workflow; do not reuse v1.1 screening models.'))
 
 with st.sidebar:
     workflow=st.selectbox(t("작업 선택","Workflow"),["single","standards"],
@@ -170,8 +173,8 @@ with st.sidebar:
 
         if screen_model is None:
             st.info(t(
-                "사용 가능한 선별 모델이 없습니다. 표준 일괄 분석에서 저장한 모델을 불러오세요.",
-                "No screening model is available. Load a model exported from standard-series analysis."
+                "v1.2용 선별 모델이 아직 없습니다. 먼저 ‘표준 이미지 일괄 분석’에서 개발 세트로 새 screening_model.json을 만들거나, 이미 만든 v1.2 모델을 업로드하세요. v1.1 모델은 격자 엔진이 달라 호환되지 않습니다.",
+                "No v1.2 screening model is available yet. Build one from a development set in Standard-image series, or upload an existing v1.2 model. v1.1 models are intentionally incompatible because the geometry engine changed."
             ))
         else:
             st.session_state["active_screening_model"]=screen_model
@@ -211,9 +214,12 @@ if advanced:
                 yr=st.slider(t("세로 범위 (pixel)","Vertical range (pixel)"),0,h,(0,h),key="roi_y_"+input_hash[:8])
                 cfg=replace(cfg,roi=(xr[0],yr[0],xr[1],yr[1]))
             if geo=="auto":
-                override=st.checkbox(t("자동 격자 탐색값 직접 보정","Override automatic candidate settings"),value=False,key="geo_override")
+                st.caption(t("Scale-aware pitch 추정이 기본으로 켜져 있습니다. 이미지 전체의 반복 주기를 먼저 찾아 well 간격을 정한 뒤 local peak를 검출합니다. 수동 값은 자동 QC가 실패할 때만 사용하세요.",
+                             "Scale-aware pitch estimation is enabled by default. The app estimates image-wide periodicity before local peak detection. Use a manual hint only when automatic QC fails."))
+                override=st.checkbox(t("자동 pitch/후보값 수동 보정","Manually override automatic pitch/candidate settings"),value=False,key="geo_override")
                 if override:
-                    hint=st.number_input(t("예상 pitch (원래 pixel)","Expected pitch (native pixel)"),min_value=3.0,max_value=300.0,value=6.0,step=.1,key="pitch_hint")
+                    default_hint=max(3.0,min(300.0,float(min(w,h))/60.0))
+                    hint=st.number_input(t("예상 pitch (원래 pixel)","Expected pitch (native pixel)"),min_value=3.0,max_value=500.0,value=float(round(default_hint,1)),step=.1,key="pitch_hint")
                     floor=st.number_input(t("격자 후보 최소 신호 (원래 단위)","Geometry candidate floor (native units)"),min_value=0.0,value=15.0,step=1.0,key="floor")
                     cfg=replace(cfg,pitch_hint=float(hint),candidate_floor=float(floor))
             elif geo=="template":
@@ -421,6 +427,11 @@ else:
     with tabs[1]:
         g=summary["geometry"]
         st.write(t("**추정/지정 격자:** ","**Inferred/defined lattice:** ")+f"{g['columns']} columns × {g['rows']} rows · pitch X {g['pitch_x_px']:.3f} px / Y {g['pitch_y_px']:.3f} px")
+        method=g.get('pitch_estimation_method','defined geometry')
+        if g.get('scale_aware_pitch_used'):
+            st.success(t("자동 해상도 보정 적용: ","Scale-aware pitch applied: ")+f"{g.get('initial_pitch_px',g['pitch_px']):.2f} px · method={method} · pitch CV={g.get('pitch_cv_pct',float('nan')):.2f}%")
+        else:
+            st.caption(t("Pitch 추정 방식: ","Pitch estimation: ")+str(method))
         st.caption(t("행×열은 격자 범위이고, 실제 분모는 완전한 측정 영역이 남은 well입니다. FL 영상만으로 충전 여부까지 확인한 값은 아닙니다.","Rows × columns describes the lattice extent. The denominator includes complete measurable footprints; filling is not established from fluorescence alone."))
         st.image(imgs["grid"],width="stretch",output_format="PNG")
         with st.expander(t("원래 픽셀의 확대 영역 확인","Inspect a zoomed native-pixel region"),expanded=False):

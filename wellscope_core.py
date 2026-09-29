@@ -1,4 +1,4 @@
-"""WellScope LAMP 1.1.0 — reproducible, native-pixel microwell measurements.
+"""WellScope LAMP 1.2.0 — scale-aware grid localization with native-pixel photometry.
 
 This module intentionally does not infer GMO content from a filename or from a
 positive-well percentage alone. It has no network, Streamlit, or AI dependency.
@@ -20,12 +20,13 @@ import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image
-from scipy.ndimage import center_of_mass, gaussian_filter, label, maximum_filter
+from scipy.ndimage import center_of_mass, gaussian_filter, gaussian_filter1d, label, maximum_filter
 from scipy.spatial import cKDTree
+from scipy.signal import find_peaks
 
 APP_NAME = "WellScope LAMP"
 APP_SUBTITLE = "Microwell fluorescence analysis"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 ENGINE_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 MAX_FILE_BYTES = 30 * 1024 * 1024
 MAX_PIXELS = 16_000_000
@@ -151,6 +152,91 @@ def _roi_mask(frame: dict, cfg: Settings) -> tuple[np.ndarray, tuple[int, int, i
     return mask, (x0, y0, x1, y1)
 
 
+def _axis_period_from_projection(profile: np.ndarray) -> tuple[float, float] | None:
+    """Estimate the fundamental grid period from a 1-D intensity projection.
+
+    The broad baseline is removed before autocorrelation.  We deliberately choose
+    the *smallest* strong autocorrelation peak, because later peaks are usually
+    integer multiples of the microwell pitch.  This is geometry-only processing;
+    photometry is still performed on the original native pixels.
+    """
+    p=np.asarray(profile,dtype=float)
+    n=len(p)
+    if n<40 or not np.isfinite(p).all() or float(np.ptp(p))<=0:
+        return None
+    smooth=gaussian_filter1d(p,1.0,mode="nearest")
+    baseline=gaussian_filter1d(smooth,max(8.0,n/60.0),mode="nearest")
+    y=smooth-baseline
+    y-=float(np.mean(y))
+    if float(np.std(y))<=1e-9:
+        return None
+    # Taper the edges so a hard crop does not dominate the autocorrelation.
+    y*=np.hanning(n)
+    fft_n=1
+    while fft_n<2*n: fft_n*=2
+    f=np.fft.rfft(y,n=fft_n)
+    ac=np.fft.irfft(f*np.conj(f),n=fft_n)[:n]
+    if not np.isfinite(ac[0]) or ac[0]<=0:
+        return None
+    ac=ac/ac[0]
+    lo=3
+    hi=min(400,n//3)
+    if hi<=lo+2:
+        return None
+    peaks,props=find_peaks(ac[lo:hi+1],prominence=0.01,distance=2)
+    if len(peaks)==0:
+        return None
+    peaks=peaks+lo
+    vals=ac[peaks]
+    vmax=float(np.max(vals))
+    # A strong fundamental is expected to recur at integer multiples.  The
+    # smallest peak within 90% of the strongest periodic response works for both
+    # the ~6 px legacy images and the ~34 px native high-resolution images.
+    strong=peaks[vals>=max(0.25,0.90*vmax)]
+    if len(strong)==0:
+        return None
+    period=float(np.min(strong))
+    score=float(ac[int(round(period))])
+    return period,score
+
+
+def estimate_periodic_pitch(plane: np.ndarray, valid: np.ndarray) -> dict | None:
+    """Scale-aware pitch estimate from image-wide X/Y periodicity.
+
+    Returns None when the periodic signal is not reliable enough; callers then
+    fall back to the legacy nearest-candidate estimate or a user pitch hint.
+    """
+    ys,xs=np.where(valid)
+    if len(xs)<100:
+        return None
+    x0,x1=int(xs.min()),int(xs.max())+1
+    y0,y1=int(ys.min()),int(ys.max())+1
+    sub=plane[y0:y1,x0:x1].astype(float)
+    vm=valid[y0:y1,x0:x1]
+    wx=np.maximum(vm.sum(axis=0),1)
+    wy=np.maximum(vm.sum(axis=1),1)
+    px=(sub*vm).sum(axis=0)/wx
+    py=(sub*vm).sum(axis=1)/wy
+    ex=_axis_period_from_projection(px)
+    ey=_axis_period_from_projection(py)
+    if ex is None or ey is None:
+        return None
+    pitch_x,score_x=ex; pitch_y,score_y=ey
+    mean_pitch=(pitch_x+pitch_y)/2.0
+    mismatch=abs(pitch_x-pitch_y)/max(mean_pitch,1e-9)
+    if mean_pitch<3 or mismatch>0.15 or min(score_x,score_y)<0.25:
+        return None
+    # Prevent a mathematically strong but biologically implausible ultra-sparse
+    # period from being accepted as an array pitch.
+    nx=(x1-x0)/mean_pitch; ny=(y1-y0)/mean_pitch
+    if min(nx,ny)<4 or nx*ny>MAX_WELLS*1.5:
+        return None
+    return {"pitch_px":float(mean_pitch),"pitch_x_projection_px":float(pitch_x),
+            "pitch_y_projection_px":float(pitch_y),"periodicity_score_x":float(score_x),
+            "periodicity_score_y":float(score_y),"periodicity_axis_mismatch_pct":float(mismatch*100),
+            "periodicity_roi":[x0,y0,x1,y1]}
+
+
 def _candidates(plane: np.ndarray, valid: np.ndarray, cfg: Settings) -> tuple[np.ndarray, dict]:
     # Filtering is used only to locate geometry. Photometry uses the original plane.
     smooth = gaussian_filter(plane.astype(np.float32), 0.45)
@@ -160,7 +246,9 @@ def _candidates(plane: np.ndarray, valid: np.ndarray, cfg: Settings) -> tuple[np
     baseline = float(np.percentile(values, 20))
     high = float(np.percentile(values, 99.5))
     floor = float(cfg.candidate_floor) if cfg.candidate_floor is not None else baseline + max((high-baseline)*0.07, 0.1)
-    neighborhood = max(3, int(cfg.pitch_hint * 0.45) | 1) if cfg.pitch_hint else 3
+    periodic=estimate_periodic_pitch(plane,valid) if cfg.pitch_hint is None else None
+    search_pitch=float(cfg.pitch_hint) if cfg.pitch_hint is not None else (periodic["pitch_px"] if periodic else None)
+    neighborhood=max(3,int(round(search_pitch*0.45))|1) if search_pitch is not None else 3
     peak = (smooth == maximum_filter(smooth, size=neighborhood)) & (smooth > floor) & valid
     labs, n = label(peak)
     if n < 20:
@@ -183,9 +271,8 @@ def _candidates(plane: np.ndarray, valid: np.ndarray, cfg: Settings) -> tuple[np
         refined.append((x,y))
     pts=np.asarray(refined)
     tree=cKDTree(pts); distances,_=tree.query(pts,k=2)
-    pitch=float(np.median(distances[:,1]))
-    if cfg.pitch_hint is not None:
-        pitch=float(cfg.pitch_hint)
+    nearest_pitch=float(np.median(distances[:,1]))
+    pitch=float(search_pitch) if search_pitch is not None else nearest_pitch
     if pitch < 3:
         raise AnalysisError("Estimated pitch is below 3 native pixels. Use a higher-resolution original or a checked pitch hint.")
     # Suppress duplicate maxima only after measuring a spacing estimate.
@@ -197,7 +284,13 @@ def _candidates(plane: np.ndarray, valid: np.ndarray, cfg: Settings) -> tuple[np
     pts=pts[np.sort(kept)]
     if len(pts)<20:
         raise AnalysisError("Too few independent candidates remain. Check the pitch hint and ROI.")
-    return pts, {"candidate_floor_native": floor, "candidate_count": int(len(pts)), "initial_pitch_px": pitch}
+    pitch_method=("manual_pitch_hint" if cfg.pitch_hint is not None else
+                  ("projection_autocorrelation" if periodic is not None else "nearest_candidate_fallback"))
+    details={"candidate_floor_native":floor,"candidate_count":int(len(pts)),
+             "initial_pitch_px":pitch,"nearest_candidate_pitch_px":nearest_pitch,
+             "pitch_estimation_method":pitch_method,"scale_aware_pitch_used":bool(periodic is not None)}
+    if periodic is not None: details.update(periodic)
+    return pts, details
 
 
 def _design(c: np.ndarray, r: np.ndarray) -> np.ndarray:
@@ -278,7 +371,7 @@ def automatic_grid(plane: np.ndarray, valid: np.ndarray, cfg: Settings) -> dict:
     dy=np.linalg.norm(np.diff(arr,axis=0),axis=2)
     p_x=float(np.median(dx));p_y=float(np.median(dy)); pitch=min(p_x,p_y)
     density=len(best)/(rows*cols)
-    details.update({"geometry_source":"auto_quadratic_smoothed_lattice", "rows":rows,"columns":cols,
+    details.update({"geometry_source":"auto_scale_aware_quadratic_smoothed_lattice", "rows":rows,"columns":cols,
                     "pitch_x_px":p_x,"pitch_y_px":p_y,"pitch_px":pitch,
                     "angle_deg":math.degrees(theta),"component_support_fraction":support,
                     "observed_geometry_fraction":density,
@@ -454,6 +547,8 @@ def analyze(data: bytes, cfg: Settings, template_bytes: bytes | None = None, sou
     if grid["details"]["pitch_px"]<8:flag("LOW_NATIVE_RESOLUTION","warning","Pitch is below 8 native pixels. This is a software caution, not a validated acceptance limit; verify using the original higher-resolution image.")
     if cfg.geometry_mode=="auto":
         flag("INFERRED_GEOMETRY","info","Grid extent is inferred from visible spots. Completely dark outer rows cannot be recovered reliably; a structural image/registered template or known geometry is needed for such samples.")
+        if grid["details"].get("scale_aware_pitch_used"):
+            flag("SCALE_AWARE_PITCH","info","Grid pitch was estimated from image-wide periodicity before local well localization; photometry still uses native pixels.")
         if grid["details"].get("component_support_fraction",1)<0.9:flag("PARTIAL_GRID_SUPPORT","warning","Some observed spots are outside the main fitted lattice; inspect the full grid.")
     if cfg.geometry_mode=="template":flag("REGISTRATION_REQUIRED","warning","Template geometry is fixed in pixel coordinates. Confirm identical field of view, orientation and registration.")
     sat=float((table.loc[table.valid,"saturated_inner_pixel_fraction"]>0).mean())

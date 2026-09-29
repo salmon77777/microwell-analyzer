@@ -17,6 +17,8 @@ def render_standards(en:bool=False)->None:
                'Derive one well cutoff from zero-reference images and apply it to all standards. Then save a separate sample screening rule.'))
     st.caption(t('파일명은 표준 라벨의 제안에만 사용됩니다. 미지 시료를 예측할 때 파일명과 알고 있는 함량은 사용하지 않습니다. 한 번에 3–30장, 합계 100 MB까지.',
                  'Filenames only suggest labels here; they are never used for unknown predictions. Use 3–30 images, up to 100 MB total.'))
+    st.info(t('v1.2는 이미지 전체 주기성으로 native-pixel pitch를 먼저 추정한 뒤 격자를 맞춥니다. 340 px와 1992 px처럼 해상도가 달라도 각 이미지의 pitch를 독립적으로 찾지만, 최종 선별 모델은 동일한 촬영·반응 조건의 개발 세트에서 새로 만들어야 합니다.',
+              'v1.2 estimates native-pixel pitch from image-wide periodicity before fitting the lattice. It can localize grids across different resolutions, but the final screening model must still be rebuilt on a development set acquired under equivalent assay/imaging conditions.'))
     files=st.file_uploader(t('표준 PNG/TIFF 파일을 함께 선택','Select standard PNG/TIFF images'),type=['png','jpg','jpeg','tif','tiff'],accept_multiple_files=True,key='standards_upload')
     if not files:
         st.info(t('먼저 0, 1, 3, 5, 10, 30, 50, 70, 90, 100% 이미지를 선택하세요. 반복 시료가 있으면 함께 올려도 됩니다.',

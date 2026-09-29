@@ -1,4 +1,4 @@
-"""Standard-series analysis and locked, exploratory sample screening.
+"""Standard-series analysis and locked screening for the v1.2 scale-aware geometry engine.
 
 Two independent cutoffs:
   well cutoff: reference-zero signal quantile (or an operator-fixed value);
@@ -123,10 +123,12 @@ def _contract(batch:dict)->dict:
     results=list(batch['results'].values());first=results[0]['summary'];cfg=batch['settings']
     pitches=[a['summary']['geometry']['pitch_px'] for a in results]
     sizes=[[a['summary']['image']['width'],a['summary']['image']['height']] for a in results]
+    shapes=[[a['summary']['geometry']['rows'],a['summary']['geometry']['columns']] for a in results]
     return {'bit_depth':first['image']['bit_depth'],'color_mode':first['image']['color_mode'],
       'channel':cfg['channel'],'inner_ratio':cfg['inner_ratio'],'bg_inner_ratio':cfg['bg_inner_ratio'],
       'bg_outer_ratio':cfg['bg_outer_ratio'],'acquisition_id':cfg['acquisition_id'],
-      'signal_method':'native_disc_mean_minus_annulus_median','training_sizes':sizes,
+      'signal_method':'native_disc_mean_minus_annulus_median','geometry_engine':'scale_aware_periodic_pitch_v1',
+      'training_sizes':sizes,'training_grid_shapes':shapes,
       'size_tolerance_px':2,'pitch_range_px':[float(min(pitches)*.85),float(max(pitches)*1.15)],
       'tolerances_scope':'software compatibility only; matching exposure/assay/input conditions require operator confirmation'}
 
